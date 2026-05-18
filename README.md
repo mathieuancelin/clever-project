@@ -1,95 +1,97 @@
 # clever-project
 
-CLI Rust qui synchronise une description de projet (YAML/JSON) avec les ressources d'une organisation Clever Cloud. L'orchestration réelle est déléguée au CLI officiel `clever-tools`.
+A Rust CLI that syncs a project description (YAML/JSON) with the resources of a Clever Cloud organisation. The actual orchestration is delegated to the official `clever-tools` CLI.
 
-Voir [specs.md](./specs.md) pour le cahier des charges détaillé.
+See [specs.md](./specs.md) for the detailed specification.
 
-## Statut du prototype
+## Prototype status
 
-Légende: ✅ fait · 🚧 en cours · ⏳ à faire · ⛔ hors scope du prototype
+Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the prototype
 
-### Fait
-- ✅ Squelette Cargo + dépendances (`clap`, `serde`, `serde_yaml`, `serde_json`, `anyhow`, `tracing`, `which`, `indexmap`, `regex`)
-- ✅ Modèle de données + chargement YAML/JSON détecté par extension
-- ✅ Interpolation `${var}` (variables du fichier, `--variable foo=bar` prioritaires, variables spéciales `${env}`/`${org}`/`${region}`, rejet des réservées, erreur si manquante)
-- ✅ Wrapper `clever-tools` (lecture + écriture) :
-    - lecture : `list_apps`, `list_addons`, `get_env`, `get_domains`, `get_services`
-    - écriture : `create_app`, `delete_app`, `create_addon`, `delete_addon`, `env_replace`, `domain_add`, `domain_rm`, `scale`, `link_addon`/`unlink_addon`, `link_app`/`unlink_app`
-- ✅ Commande **`delete`** : supprime les apps puis addons listés dans le projet, retrouvés par `name` dans l'orga. Stop+log à la première erreur.
-- ✅ Commande **`apply`** :
-    - phase 1 : créer les addons absents (les existants sont laissés tels quels avec warning si `kind` diverge)
-    - phase 2 : créer les apps absentes (avec `--github owner/repo` si la source est github) ; pour les apps existantes, full replace de `env`, `domains`, `scalability` *si* `kind`+`source` matchent, sinon warning et skip
-    - phase 3 : résolution des `dependencies` (clés projet → ids clever) et link/unlink via `clever service` pour converger
-- ✅ Commande **`read`** : lit apps/addons explicites (`--app`/`--addon`, répétables) ou `--all`, récupère env + domains + dependencies, génère le fichier de sortie au format `yaml`/`json` selon l'extension de `-o`
-- ✅ 18 tests unitaires verts, build sans warning
+### Done
+- ✅ Cargo skeleton + dependencies (`clap`, `serde`, `serde_yaml`, `serde_json`, `anyhow`, `tracing`, `which`, `indexmap`, `regex`)
+- ✅ Data model + YAML/JSON loading (format detected by file extension)
+- ✅ `${var}` interpolation (file `variables:` section, `--variable foo=bar` CLI overrides take precedence, special variables `${env}`/`${org}`/`${region}`, reserved-name rejection, hard error on missing variable)
+- ✅ `clever-tools` wrapper (read + write):
+    - read: `list_apps`, `list_addons`, `get_env`, `get_domains`, `get_services`
+    - write: `create_app`, `delete_app`, `create_addon`, `delete_addon`, `env_replace`, `domain_add`, `domain_rm`, `scale`, `link_addon`/`unlink_addon`, `link_app`/`unlink_app`
+- ✅ **`delete`** command: removes the apps then addons listed in the project, looked up by `name` in the org. Stops and logs on the first error.
+- ✅ **`apply`** command:
+    - phase 1: create missing addons (existing ones are left untouched, with a warning if the `kind` diverges)
+    - phase 2: create missing apps (with `--github owner/repo` when the source is a GitHub URL); for existing apps, full-replace `env`, `domains`, `scalability` *iff* `kind`+`source` match, otherwise warn and skip
+    - phase 3: resolve `dependencies` (project keys → clever ids) and link/unlink via `clever service` to converge
+- ✅ **`read`** command: reads the explicitly requested apps/addons (`--app`/`--addon`, repeatable, by name or id) or `--all`, fetches env + domains + dependencies, writes the output file as `yaml` or `json` based on the `-o` extension
+- ✅ Provider-name mapping for addon creation (`postgresql` → `postgresql-addon`, `cellar` → `cellar-addon`, `matomo` → `addon-matomo`, etc. — pass-through for anything unknown)
+- ✅ `--env <value>` shortcut on `apply` and `delete` to set the special `${env}` variable
+- ✅ 19 unit tests green, build with no warnings
 
-### Décisions prises
+### Decisions
 
-| Sujet | Choix |
+| Topic | Choice |
 |---|---|
-| `clever` dans le PATH | Pré-requis ; pas de gestion nvm/bun dans la CLI |
-| Source github | `clever create --github owner/repo`, l'utilisateur déploie son code lui-même |
-| Source non-github | App créée vide, warning loggé, l'utilisateur déploie via le remote git interne de Clever |
-| Diff sur `apply` | Full replace : env, domains, dependencies, scalability. Le fichier est la vérité. |
-| `read --all` | Disponible mais non par défaut |
-| Erreur partielle | Stop + log, pas de rollback |
-| Détection format | Par extension `.yaml`/`.yml`/`.json` |
-| Parallélisme | Séquentiel pour le prototype |
-| Ordre `delete` | Apps d'abord, puis addons (libère les liens service avant) |
+| `clever` on PATH | Prerequisite; no nvm/bun handling inside the CLI |
+| GitHub source | `clever create --github owner/repo`; the user deploys their own code afterwards |
+| Non-GitHub source | App created empty, warning logged; user deploys via Clever's internal git remote |
+| Diff on `apply` | Full replace: env, domains, dependencies, scalability. The file is the source of truth. |
+| `read --all` | Available but not the default |
+| Partial failure | Stop + log, no rollback |
+| Format detection | By `.yaml`/`.yml`/`.json` extension |
+| Parallelism | Sequential for the prototype |
+| `delete` order | Apps first, then addons (releases service links before touching addons) |
 
-### Limitations connues / hors scope du prototype
-- ⛔ **Push du code source** : pas de clone/push automatique. Avec une source github → `--github`. Sinon, app créée vide.
-- ⛔ **`config`** (`clever config`) : pas exposé en JSON par `clever-tools`. Ignoré côté `read` comme côté `apply`. Le champ est conservé dans le modèle pour plus tard.
-- ⛔ **`scalability` côté `read`** : `clever scale` n'a pas de mode lecture/JSON. La section n'est donc pas régénérée depuis l'existant (`scalability: None`).
-- ⛔ **Mise à jour des addons** : si un addon existe déjà, pas d'update (ni `size`, ni `version`). Warning si le `kind`/`providerId` diverge.
-- ⛔ **`network_groups`** : champ présent dans le modèle, non traité.
-- ⛔ **`crypted`** sur les addons : passé en `--option encryption=true` à la création (à valider selon le provider), non détecté côté `read`.
-- ⛔ **`backup_path`** sur les addons : champ présent, non traité.
-- ⛔ **Rollback** sur erreur partielle : pas implémenté (stop + log).
-- ⛔ **Mode `--dry-run`** : pas implémenté.
-- ⛔ **Parallélisme** : séquentiel.
-- ⛔ Domaines auto-gérés `*.cleverapps.io` : exclus de `read` et jamais supprimés par `apply`.
+### Known limitations / out of scope for the prototype
+- ⛔ **Source code push**: no automatic clone/push. GitHub source → `--github`. Otherwise the app is created empty.
+- ⛔ **`config`** (`clever config`): not exposed in JSON by `clever-tools`. Ignored on both `read` and `apply`. The field is kept in the model for later.
+- ⛔ **`scalability` on `read`**: `clever scale` has no read/JSON mode. The section can't be regenerated from existing resources (`scalability: None`).
+- ⛔ **Addon updates**: if an addon already exists, no update is performed (neither `size` nor `version`). A warning is logged if the `kind`/`providerId` diverges.
+- ⛔ **`network_groups`**: field present in the model, not handled.
+- ⛔ **`crypted`** on addons: passed as `--option encryption=true` at creation (to be validated per provider), not detected on `read`.
+- ⛔ **`backup_path`** on addons: field present, not handled.
+- ⛔ **Rollback** on partial failure: not implemented (stop + log).
+- ⛔ **`--dry-run`** mode: not implemented.
+- ⛔ **Parallelism**: sequential.
+- ⛔ Auto-managed `*.cleverapps.io` domains: excluded from `read` and never removed by `apply`.
 
-### Questions encore ouvertes (à valider à l'usage)
-- L'option `--option encryption=true` à la création d'addon est un best-effort, à vérifier selon le provider (PostgreSQL le supporte sous ce nom, à confirmer pour Redis/Cellar/etc.).
-- `clever create --type java` vs `clever applications list` qui retourne `type: jar` : on tolère les deux (mapping `java` ↔ `jar`).
-- Les addons Materia KV / Cellar n'ont pas de `version` configurable — à ignorer côté `apply`.
+### Still open (to validate in real use)
+- The `--option encryption=true` flag on addon creation is best-effort; the option name needs to be confirmed per provider (PostgreSQL supports it under this name, to be confirmed for Redis/Cellar/etc.).
+- `clever create --type java` vs. `clever applications list` returning `type: jar`: we tolerate both (mapping `java` ↔ `jar`).
+- Materia KV / Cellar addons have no configurable `version` — to be ignored on `apply`.
 
-## Utilisation
+## Usage
 
 ```sh
-# Lire des ressources existantes pour bootstrap un fichier projet
+# Read existing resources to bootstrap a project file
 clever-project read --org orga_xxx --app frontend --addon main-db -o project.yaml
 
-# Tout lire dans une orga
+# Read everything in an org
 clever-project read --org orga_xxx --all -o project.yaml
 
-# Appliquer un fichier projet
-clever-project apply project.yaml [--org ...] [--region ...] [--variable env=staging]
+# Apply a project file
+clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--variable foo=bar]
 
-# Supprimer les ressources listées dans un fichier
-clever-project delete project.yaml [--org ...] [--variable env=staging]
+# Delete the resources listed in a project file
+clever-project delete project.yaml [--org ...] [--env staging]
 ```
 
-Verbosité accrue :
+Verbose mode:
 ```sh
 clever-project --verbose apply project.yaml
 ```
 
-## Structure du code
+## Code layout
 
 ```
 src/
-├── main.rs              # entrée + init tracing
+├── main.rs              # entry point + tracing init
 ├── cli.rs               # clap (Cli, Command, ReadArgs, ApplyArgs, DeleteArgs)
 ├── model.rs             # Project / App / Addon / ... + load_and_resolve
-├── interpolate.rs       # Resolver : ${var}, variables spéciales, walk de Value
-├── clever.rs            # wrapper Command::new("clever") + helpers typés
+├── interpolate.rs       # Resolver: ${var}, special variables, Value walk
+├── clever.rs            # Command::new("clever") wrapper + typed helpers
 └── commands/
     ├── mod.rs
-    ├── apply.rs         # 3 phases : addons → apps (create/update) → service links
-    ├── delete.rs        # apps puis addons, lookup par name
-    └── read.rs          # introspection org → Project
+    ├── apply.rs         # 3 phases: addons → apps (create/update) → service links
+    ├── delete.rs        # apps then addons, looked up by name
+    └── read.rs          # org introspection → Project
 ```
 
 ## Build & tests
