@@ -23,7 +23,10 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     )
     .with_context(|| format!("loading project `{}`", args.file.display()))?;
 
-    let clever = Clever::new()?;
+    let clever = Clever::new()?.with_dry_run(args.dry_run);
+    if clever.is_dry_run() {
+        info!("[dry-run] no mutations will be sent to Clever Cloud");
+    }
 
     let existing_apps = clever
         .list_apps(&project.org)
