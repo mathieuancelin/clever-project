@@ -66,6 +66,11 @@ pub struct ApplyArgs {
     /// Set a variable (key=value). Overrides values from the project file.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
+
+    /// Plan only: read current state and log what would change without
+    /// mutating anything on Clever Cloud.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +93,10 @@ pub struct DeleteArgs {
     /// Set a variable (key=value). Overrides values from the project file.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
+
+    /// Plan only: log what would be deleted without mutating anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
