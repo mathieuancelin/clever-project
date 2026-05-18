@@ -1,5 +1,6 @@
 name: App test project
 description: A very nice project
+# org: org_xxxxxx
 region: par
 variables:
   domain: foo.bar
@@ -7,8 +8,8 @@ apps:
   app:
     name: ${env}-apptest
     kind: node
-    #source:
-    #  from: https://github.com/mathieuancelin/demo-mcp-apps.git
+    # source:
+    #   from: https://github.com/mathieuancelin/demo-mcp-apps.git
     domains:
     - apptest.${domain}
     dependencies:
