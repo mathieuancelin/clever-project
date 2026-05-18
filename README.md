@@ -71,6 +71,18 @@ clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--
 
 # Delete the resources listed in a project file
 clever-project delete project.yaml [--org ...] [--env staging]
+
+# real world example app creation
+clever-project apply ./test_project.yaml --org orga_xxxxxxx --env dev
+clever-project apply ./test_project.yaml --org orga_xxxxxxx --env prod
+clever-project apply ./test_project.yaml --org orga_xxxxxxx --env dev --region rbx
+clever-project apply ./test_project.yaml --org orga_xxxxxxx --env prod --region rbx
+
+# real world example app delete
+clever-project delete ./test_project.yaml --org orga_xxxxxxx --env dev
+clever-project delete ./test_project.yaml --org orga_xxxxxxx --env prod
+clever-project delete ./test_project.yaml --org orga_xxxxxxx --env dev --region rbx
+clever-project delete ./test_project.yaml --org orga_xxxxxxx --env prod --region rbx
 ```
 
 Verbose mode:
