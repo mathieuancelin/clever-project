@@ -23,13 +23,24 @@ pub fn ensure_available() -> Result<PathBuf> {
 #[derive(Debug)]
 pub struct Clever {
     program: PathBuf,
+    dry_run: bool,
 }
 
 impl Clever {
     pub fn new() -> Result<Self> {
         Ok(Self {
             program: ensure_available()?,
+            dry_run: false,
         })
+    }
+
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
     }
 
     /// Run a `clever` subcommand and return its parsed JSON output.
@@ -119,6 +130,14 @@ impl Clever {
     /// Create an application. Returns the new app id (looked up by name after
     /// creation since `clever create`'s JSON output shape is not relied upon).
     pub fn create_app(&self, params: &CreateApp<'_>) -> Result<String> {
+        if self.dry_run {
+            info!(
+                "[dry-run] would create app `{}` (type={}, region={}, github={:?})",
+                params.name, params.kind, params.region, params.github
+            );
+            return Ok(dry_run_id("app", params.name));
+        }
+
         let mut args: Vec<&str> = vec![
             "create",
             params.name,
@@ -143,11 +162,28 @@ impl Clever {
     }
 
     pub fn delete_app(&self, app: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would delete app `{app}`");
+            return Ok(());
+        }
         self.run(&["delete", "--app", app, "--yes"])
     }
 
     /// Create an addon. Returns the new addon id (looked up by name).
     pub fn create_addon(&self, params: &CreateAddon<'_>) -> Result<String> {
+        if self.dry_run {
+            info!(
+                "[dry-run] would create addon `{}` (provider={}, region={}, plan={:?}, version={:?}, crypted={})",
+                params.name,
+                params.provider,
+                params.region,
+                params.plan,
+                params.version,
+                params.crypted
+            );
+            return Ok(dry_run_id("addon", params.name));
+        }
+
         let mut args: Vec<&str> = vec![
             "addon",
             "create",
@@ -190,12 +226,26 @@ impl Clever {
     }
 
     pub fn delete_addon(&self, addon: &str, org: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would delete addon `{addon}`");
+            return Ok(());
+        }
         self.run(&["addon", "delete", addon, "--org", org, "--yes"])
     }
 
     /// Replace the entire environment for an app. Uses `clever env import
     /// --json` which deletes any pre-existing variables.
     pub fn env_replace(&self, app: &str, env: &IndexMap<String, String>) -> Result<()> {
+        if self.dry_run {
+            let keys: Vec<&str> = env.keys().map(String::as_str).collect();
+            info!(
+                "[dry-run] would replace env on `{app}` ({} vars: {})",
+                env.len(),
+                keys.join(", ")
+            );
+            return Ok(());
+        }
+
         #[derive(serde::Serialize)]
         struct Pair<'a> {
             name: &'a str,
@@ -233,14 +283,29 @@ impl Clever {
     }
 
     pub fn domain_add(&self, app: &str, hostname: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would add domain `{hostname}` to `{app}`");
+            return Ok(());
+        }
         self.run(&["domain", "add", hostname, "--app", app])
     }
 
     pub fn domain_rm(&self, app: &str, hostname: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would remove domain `{hostname}` from `{app}`");
+            return Ok(());
+        }
         self.run(&["domain", "rm", hostname, "--app", app])
     }
 
     pub fn scale(&self, app: &str, scalability: &Scalability) -> Result<()> {
+        if self.dry_run {
+            info!(
+                "[dry-run] would scale `{app}` (auto={}, instances={:?})",
+                scalability.auto, scalability.instances
+            );
+            return Ok(());
+        }
         let mut args: Vec<String> = vec![
             "scale".into(),
             "--app".into(),
@@ -281,20 +346,42 @@ impl Clever {
     }
 
     pub fn link_addon(&self, app: &str, addon: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would link addon `{addon}` to `{app}`");
+            return Ok(());
+        }
         self.run(&["service", "link-addon", addon, "--app", app])
     }
 
     pub fn unlink_addon(&self, app: &str, addon: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would unlink addon `{addon}` from `{app}`");
+            return Ok(());
+        }
         self.run(&["service", "unlink-addon", addon, "--app", app])
     }
 
     pub fn link_app(&self, app: &str, dep: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would link app `{dep}` to `{app}`");
+            return Ok(());
+        }
         self.run(&["service", "link-app", dep, "--app", app])
     }
 
     pub fn unlink_app(&self, app: &str, dep: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would unlink app `{dep}` from `{app}`");
+            return Ok(());
+        }
         self.run(&["service", "unlink-app", dep, "--app", app])
     }
+}
+
+/// Synthetic id used in dry-run mode so dependency resolution still has
+/// something stable to reference. Never sent to `clever`.
+fn dry_run_id(kind: &str, name: &str) -> String {
+    format!("dry-run::{kind}::{name}")
 }
 
 #[derive(Debug)]
