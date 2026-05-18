@@ -40,7 +40,6 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 | `delete` order | Apps first, then addons (releases service links before touching addons) |
 
 ### Known limitations / out of scope for the prototype
-- ⛔ **Source code push**: no automatic clone/push. GitHub source → `--github`. Otherwise the app is created empty.
 - ⛔ **`config`** (`clever config`): not exposed in JSON by `clever-tools`. Ignored on both `read` and `apply`. The field is kept in the model for later.
 - ⛔ **`scalability` on `read`**: `clever scale` has no read/JSON mode. The section can't be regenerated from existing resources (`scalability: None`).
 - ⛔ **Addon updates**: if an addon already exists, no update is performed (neither `size` nor `version`). A warning is logged if the `kind`/`providerId` diverges.
