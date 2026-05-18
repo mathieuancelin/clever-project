@@ -51,11 +51,6 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ⛔ **Parallelism**: sequential.
 - ⛔ Auto-managed `*.cleverapps.io` domains: excluded from `read` and never removed by `apply`.
 
-### Still open (to validate in real use)
-- The `--option encryption=true` flag on addon creation is best-effort; the option name needs to be confirmed per provider (PostgreSQL supports it under this name, to be confirmed for Redis/Cellar/etc.).
-- `clever create --type java` vs. `clever applications list` returning `type: jar`: we tolerate both (mapping `java` ↔ `jar`).
-- Materia KV / Cellar addons have no configurable `version` — to be ignored on `apply`.
-
 ## Usage
 
 ```sh
