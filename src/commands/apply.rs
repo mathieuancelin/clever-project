@@ -20,7 +20,10 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     )
     .with_context(|| format!("loading project `{}`", args.file.display()))?;
 
-    let clever = Clever::new()?;
+    let clever = Clever::new()?.with_dry_run(args.dry_run);
+    if clever.is_dry_run() {
+        info!("[dry-run] no mutations will be sent to Clever Cloud");
+    }
 
     // Snapshot existing state in the org.
     let mut existing_apps: HashMap<String, ListedApp> = clever
@@ -206,31 +209,32 @@ fn parse_github(url: &str) -> Result<Option<String>> {
 }
 
 fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<()> {
-    // env — full replace.
-    if !app.env.is_empty() {
-        clever.env_replace(app_id, &app.env)?;
-    } else {
-        // Even an empty desired env should clear existing variables.
-        clever.env_replace(app_id, &app.env)?;
-    }
+    // env — full replace (also clears variables when env is empty).
+    clever.env_replace(app_id, &app.env)?;
 
-    // domains — diff against current.
-    let current: HashSet<String> = clever
-        .get_domains(app_id)?
-        .into_iter()
-        .map(|d| d.hostname)
-        .collect();
+    // domains — diff against current state when we have a real app id;
+    // for a freshly-created app (real or dry-run) just add the desired set.
     let desired: HashSet<String> = app.domains.iter().cloned().collect();
-    for d in desired.difference(&current) {
-        clever.domain_add(app_id, d)?;
-    }
-    for d in current.difference(&desired) {
-        // Skip default *.cleverapps.io domains — they're auto-managed by Clever
-        // and trying to remove them would fail.
-        if d.ends_with(".cleverapps.io") {
-            continue;
+    if is_synthetic(app_id) {
+        for d in &desired {
+            clever.domain_add(app_id, d)?;
         }
-        clever.domain_rm(app_id, d)?;
+    } else {
+        let current: HashSet<String> = clever
+            .get_domains(app_id)?
+            .into_iter()
+            .map(|d| d.hostname)
+            .collect();
+        for d in desired.difference(&current) {
+            clever.domain_add(app_id, d)?;
+        }
+        for d in current.difference(&desired) {
+            // Auto-managed *.cleverapps.io domains can't be removed.
+            if d.ends_with(".cleverapps.io") {
+                continue;
+            }
+            clever.domain_rm(app_id, d)?;
+        }
     }
 
     // scalability.
@@ -239,6 +243,10 @@ fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_synthetic(id: &str) -> bool {
+    id.starts_with("dry-run::")
 }
 
 fn sync_dependencies(
@@ -275,17 +283,16 @@ fn sync_dependencies(
         }
     }
 
-    let services = clever.get_services(app_id)?;
-    let current_apps: HashSet<String> = services
-        .applications
-        .iter()
-        .map(|s| s.id.clone())
-        .collect();
-    let current_addons: HashSet<String> = services
-        .addons
-        .iter()
-        .map(|s| s.id.clone())
-        .collect();
+    let (current_apps, current_addons): (HashSet<String>, HashSet<String>) = if is_synthetic(app_id) {
+        // Freshly created in dry-run: no existing links to read.
+        (HashSet::new(), HashSet::new())
+    } else {
+        let services = clever.get_services(app_id)?;
+        (
+            services.applications.iter().map(|s| s.id.clone()).collect(),
+            services.addons.iter().map(|s| s.id.clone()).collect(),
+        )
+    };
 
     for id in desired_addons.difference(&current_addons) {
         clever.link_addon(app_id, id)?;
