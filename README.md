@@ -23,6 +23,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ **`read`** command: reads the explicitly requested apps/addons (`--app`/`--addon`, repeatable, by name or id) or `--all`, fetches env + domains + dependencies, writes the output file as `yaml` or `json` based on the `-o` extension
 - ✅ Provider-name mapping for addon creation (`postgresql` → `postgresql-addon`, `cellar` → `cellar-addon`, `matomo` → `addon-matomo`, etc. — pass-through for anything unknown)
 - ✅ `--env <value>` shortcut on `apply` and `delete` to set the special `${env}` variable
+- ✅ `--dry-run` flag on `apply` and `delete`: reads current state but logs `[dry-run]` mutations instead of executing them
 - ✅ 19 unit tests green, build with no warnings
 
 ### Decisions
@@ -47,7 +48,6 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ⛔ **`crypted`** on addons: passed as `--option encryption=true` at creation (to be validated per provider), not detected on `read`.
 - ⛔ **`backup_path`** on addons: field present, not handled.
 - ⛔ **Rollback** on partial failure: not implemented (stop + log).
-- ⛔ **`--dry-run`** mode: not implemented.
 - ⛔ **Parallelism**: sequential.
 - ⛔ Auto-managed `*.cleverapps.io` domains: excluded from `read` and never removed by `apply`.
 
@@ -66,10 +66,10 @@ clever-project read --org orga_xxx --app frontend --addon main-db -o project.yam
 clever-project read --org orga_xxx --all -o project.yaml
 
 # Apply a project file
-clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--variable foo=bar]
+clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--variable foo=bar] [--dry-run]
 
 # Delete the resources listed in a project file
-clever-project delete project.yaml [--org ...] [--env staging]
+clever-project delete project.yaml [--org ...] [--env staging] [--dry-run]
 
 # real world example app creation
 clever-project apply ./test_project.yaml --org orga_xxxxxxx --env dev
