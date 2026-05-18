@@ -1,0 +1,5 @@
+/target
+/ignored
+.DS_Store
+specs.md
+.clever.json

@@ -1,0 +1,29 @@
+name: App test project
+description: A very nice project
+region: par
+variables:
+  domain: foo.bar
+apps:
+  app:
+    name: ${env}-apptest
+    kind: node
+    #source:
+    #  from: https://github.com/mathieuancelin/demo-mcp-apps.git
+    domains:
+    - apptest.${domain}
+    dependencies:
+    - cellar
+    - storage
+    env:
+      NODE_ENV: prod
+      PORT: '8080'
+addons:
+  cellar:
+    name: ${env}-apptest-cellar
+    kind: cellar-addon
+    size: S
+  storage:
+    name: ${env}-apptest-storage
+    kind: postgresql-addon
+    size: xs_big
+    crypted: true
