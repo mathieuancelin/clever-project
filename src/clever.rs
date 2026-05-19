@@ -132,6 +132,16 @@ impl Clever {
         serde_json::from_value(json).context("decoding addon providers output")
     }
 
+    /// List the application instance types available to the given org —
+    /// one entry per `variant.slug` (`jar`, `node`, `static-apache`, ...)
+    /// with the corresponding flavors. Used to validate project-file app
+    /// scaling sizes against the live catalog.
+    pub fn list_app_instances(&self, org: &str) -> Result<Vec<AppInstance>> {
+        let url = format!("https://api.clever-cloud.com/v2/products/instances?for={org}");
+        let json = self.run_json(&["curl", &url])?;
+        serde_json::from_value(json).context("decoding app instances output")
+    }
+
     // -------- write side --------
 
     /// Create an application. Returns the new app id (looked up by name after
@@ -507,5 +517,27 @@ pub struct AddonProvider {
 pub struct AddonPlan {
     pub slug: String,
     #[allow(dead_code)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppInstance {
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub variant: AppInstanceVariant,
+    #[serde(default)]
+    pub flavors: Vec<AppFlavor>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppInstanceVariant {
+    pub slug: String,
+    #[allow(dead_code)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppFlavor {
     pub name: String,
 }
