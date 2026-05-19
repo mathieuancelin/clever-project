@@ -3,7 +3,12 @@ description: A very nice project
 # org: org_xxxxxx
 region: par
 variables:
-  domain: foo.bar
+  common:
+    domain: foo.bar
+  prod: 
+    apikey: secret_for_prod
+  dev:
+    apikey: secret_for_dev
 apps:
   app:
     name: ${env}-apptest
@@ -18,6 +23,7 @@ apps:
     env:
       NODE_ENV: prod
       PORT: '8080'
+      APIKEY: ${apikey}
 addons:
   cellar:
     name: ${env}-apptest-cellar
