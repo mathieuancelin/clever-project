@@ -8,7 +8,7 @@ use crate::clever::{
     ListedApp, ListedNetworkGroup, NetworkGroupMember,
 };
 use crate::cli::ApplyArgs;
-use crate::commands::OrgCache;
+use crate::commands::{OrgCache, resolve_project_file};
 use crate::model::{Addon, App, NetworkGroup, Project, Source};
 use crate::state::{ResourceKind, State, StateResource};
 use indexmap::IndexMap;
@@ -25,14 +25,15 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     if let Some(env) = args.env {
         variables.push(("env".to_string(), env));
     }
+    let file = resolve_project_file(args.file, &std::env::current_dir()?)?;
     let (mut project, _resolver) = Project::load_and_resolve(
-        &args.file,
+        &file,
         args.org,
         args.region,
         &variables,
         args.secrets_path.as_deref(),
     )
-    .with_context(|| format!("loading project `{}`", args.file.display()))?;
+    .with_context(|| format!("loading project `{}`", file.display()))?;
 
     let clever = Clever::new()?.with_dry_run(args.dry_run);
     if clever.is_dry_run() {
@@ -73,7 +74,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         validate_app_scaling(&mut project.apps, &instances)?;
     }
 
-    let mut state = State::load(&args.file)?;
+    let mut state = State::load(&file)?;
     let effective_env = variables
         .iter()
         .rev()
