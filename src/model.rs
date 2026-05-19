@@ -51,6 +51,11 @@ pub fn normalize_app_kind(kind: &str) -> String {
     }
 }
 
+/// Valid values for `region` (project root, app, or addon).
+pub const ALLOWED_REGIONS: &[&str] = &[
+    "par", "parhds", "scw", "grahds", "ldn", "mtl", "rbx", "rbxhds", "sgp", "syd", "wsw",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -235,6 +240,7 @@ impl Project {
         let mut project: Project = serde_yaml::from_value(value)
             .with_context(|| format!("deserializing project from `{}`", path.display()))?;
         validate_and_normalize_app_kinds(&mut project)?;
+        validate_regions(&project)?;
         Ok((project, resolver))
     }
 
@@ -503,6 +509,32 @@ fn validate_and_normalize_app_kinds(project: &mut Project) -> Result<()> {
     Ok(())
 }
 
+/// Reject any unknown region — root, per-app, or per-addon.
+fn validate_regions(project: &Project) -> Result<()> {
+    check_region("project root", &project.region)?;
+    for (key, app) in &project.apps {
+        if let Some(r) = &app.region {
+            check_region(&format!("app `{key}`"), r)?;
+        }
+    }
+    for (key, addon) in &project.addons {
+        if let Some(r) = &addon.region {
+            check_region(&format!("addon `{key}`"), r)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_region(where_: &str, value: &str) -> Result<()> {
+    if !ALLOWED_REGIONS.contains(&value) {
+        bail!(
+            "{where_} has unknown region `{value}`. Valid regions: {}",
+            ALLOWED_REGIONS.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn load_value(path: &Path) -> Result<Value> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading project file `{}`", path.display()))?;
@@ -618,6 +650,50 @@ addons:
         let p = write_tmp("yaml", bad);
         let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
         assert!(err.to_string().contains("missing"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn unknown_root_region_is_rejected() {
+        let bad = "name: P\norg: o\nregion: atlantis\napps: {}\n";
+        let p = write_tmp("yaml", bad);
+        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("atlantis"));
+        assert!(msg.contains("Valid regions"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn unknown_app_region_is_rejected() {
+        let bad = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: node\n    region: zzz\n";
+        let p = write_tmp("yaml", bad);
+        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("app `a`"));
+        assert!(msg.contains("zzz"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn unknown_addon_region_is_rejected() {
+        let bad = "name: P\norg: o\nregion: par\napps: {}\naddons:\n  db:\n    name: x\n    kind: postgresql\n    region: nope\n";
+        let p = write_tmp("yaml", bad);
+        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("addon `db`"));
+        assert!(msg.contains("nope"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn cli_region_override_is_validated() {
+        let yaml = "name: P\norg: o\nregion: par\napps: {}\n";
+        let p = write_tmp("yaml", yaml);
+        let err =
+            Project::load_and_resolve(&p, None, Some("mars".to_string()), &[], None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("mars"));
         std::fs::remove_file(&p).ok();
     }
 
