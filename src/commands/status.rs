@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
+use serde::Serialize;
 use tracing::info;
 
 use crate::clever::Clever;
@@ -46,16 +47,109 @@ pub fn run(args: StatusArgs) -> Result<()> {
 
     let report = compute_report(&project, &live, &state);
 
-    info!(
-        "comparing project `{}` against live org `{}`",
-        project.name, project.org
-    );
-    print!("{}", render(&project, &report, args.brief));
+    if args.format.is_json() {
+        let payload = JsonStatus::from(&project, &report);
+        let out = serde_json::to_string_pretty(&payload).context("serializing JSON status")?;
+        println!("{out}");
+    } else {
+        info!(
+            "comparing project `{}` against live org `{}`",
+            project.name, project.org
+        );
+        print!("{}", render(&project, &report, args.brief));
+    }
 
     if args.exit_on_drift && report.has_drift() {
         bail!("drift detected (use `apply` to converge, or remove from project file)");
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct JsonStatus<'a> {
+    project: &'a str,
+    org: &'a str,
+    region: &'a str,
+    summary: JsonSummary,
+    apps: Vec<JsonVerdict<'a>>,
+    addons: Vec<JsonVerdict<'a>>,
+    network_groups: Vec<JsonVerdict<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonSummary {
+    synced: usize,
+    drifted: usize,
+    to_create: usize,
+    orphan: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonVerdict<'a> {
+    name: &'a str,
+    tag: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diffs: Vec<&'a FieldDiff>,
+}
+
+impl<'a> JsonStatus<'a> {
+    fn from(project: &'a Project, report: &'a Report) -> Self {
+        let mut summary = JsonSummary {
+            synced: 0,
+            drifted: 0,
+            to_create: 0,
+            orphan: 0,
+        };
+        let mut add = |tag: ResourceTag| match tag {
+            ResourceTag::Synced => summary.synced += 1,
+            ResourceTag::Drifted => summary.drifted += 1,
+            ResourceTag::OnlyInFile => summary.to_create += 1,
+            ResourceTag::OrphanInOrg => summary.orphan += 1,
+        };
+        let to_json = |v: &'a ResourceVerdict| -> JsonVerdict<'a> {
+            JsonVerdict {
+                name: v.name.as_str(),
+                tag: tag_label(v.tag),
+                diffs: v.diffs.iter().collect(),
+            }
+        };
+        let apps: Vec<_> = report
+            .apps
+            .iter()
+            .inspect(|v| add(v.tag))
+            .map(to_json)
+            .collect();
+        let addons: Vec<_> = report
+            .addons
+            .iter()
+            .inspect(|v| add(v.tag))
+            .map(to_json)
+            .collect();
+        let network_groups: Vec<_> = report
+            .network_groups
+            .iter()
+            .inspect(|v| add(v.tag))
+            .map(to_json)
+            .collect();
+        JsonStatus {
+            project: &project.name,
+            org: &project.org,
+            region: &project.region,
+            summary,
+            apps,
+            addons,
+            network_groups,
+        }
+    }
+}
+
+fn tag_label(t: ResourceTag) -> &'static str {
+    match t {
+        ResourceTag::Synced => "synced",
+        ResourceTag::Drifted => "drifted",
+        ResourceTag::OnlyInFile => "to_create",
+        ResourceTag::OrphanInOrg => "orphan",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,13 +527,13 @@ fn render_field_diff(out: &mut String, diff: &FieldDiff) {
                 quote_escape(file)
             );
         }
-        DiffBody::Set(entries) => {
+        DiffBody::Set { entries } => {
             let _ = writeln!(out, "      {}:", diff.field);
             for e in entries {
                 let _ = writeln!(out, "        {} {}", e.op, e.value);
             }
         }
-        DiffBody::Map(entries) => {
+        DiffBody::Map { entries } => {
             let _ = writeln!(out, "      {}:", diff.field);
             for e in entries {
                 match e.op {
@@ -536,7 +630,7 @@ mod tests {
         let diffs = diff_app(&a, &b, "par", "par");
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].field, "env");
-        let DiffBody::Map(entries) = &diffs[0].body else {
+        let DiffBody::Map { entries } = &diffs[0].body else {
             panic!("expected map body");
         };
         let ops: BTreeSet<char> = entries.iter().map(|e| e.op).collect();
@@ -555,7 +649,7 @@ mod tests {
         b.domains = vec!["legacy.example.com".into(), "shared.example.com".into()];
         let diffs = diff_app(&a, &b, "par", "par");
         assert_eq!(diffs.len(), 1);
-        let DiffBody::Set(entries) = &diffs[0].body else {
+        let DiffBody::Set { entries } = &diffs[0].body else {
             panic!("expected set body");
         };
         let added: Vec<&str> = entries
@@ -647,7 +741,7 @@ mod tests {
         };
         let diffs = diff_ng(&a, &b);
         assert_eq!(diffs.len(), 1);
-        let DiffBody::Set(entries) = &diffs[0].body else {
+        let DiffBody::Set { entries } = &diffs[0].body else {
             panic!("expected set body");
         };
         let added: Vec<&str> = entries
