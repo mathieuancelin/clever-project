@@ -3,11 +3,12 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, anyhow, bail};
 use tracing::{info, warn};
 
-use crate::clever::{Clever, CreateAddon, CreateApp, ListedAddon, ListedApp};
+use crate::clever::{AddonProvider, Clever, CreateAddon, CreateApp, ListedAddon, ListedApp};
 use crate::cli::ApplyArgs;
 use crate::commands::OrgCache;
-use crate::model::{App, Project, Source};
+use crate::model::{Addon, App, Project, Source};
 use crate::state::{ResourceKind, State, StateResource};
+use indexmap::IndexMap;
 
 pub fn run(args: ApplyArgs) -> Result<()> {
     let mut variables: Vec<(String, String)> = Vec::new();
@@ -21,7 +22,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     if let Some(env) = args.env {
         variables.push(("env".to_string(), env));
     }
-    let (project, _resolver) = Project::load_and_resolve(
+    let (mut project, _resolver) = Project::load_and_resolve(
         &args.file,
         args.org,
         args.region,
@@ -33,6 +34,21 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     let clever = Clever::new()?.with_dry_run(args.dry_run);
     if clever.is_dry_run() {
         info!("[dry-run] no mutations will be sent to Clever Cloud");
+    }
+
+    // Validate every addon spec against the live list of providers/plans
+    // from the Clever API. Catches typos in `kind` and `size` (including
+    // case) before any mutation goes out. Skipped if the project has no
+    // addons (no need to spend an API call).
+    if !project.addons.is_empty() {
+        info!("validating addon specs against Clever's provider list");
+        let providers = clever.list_addon_providers(&project.org).with_context(|| {
+            format!(
+                "fetching addon providers for org `{}` (used to validate addon kinds and sizes)",
+                project.org
+            )
+        })?;
+        validate_addons(&mut project.addons, &providers)?;
     }
 
     let mut state = State::load(&args.file)?;
@@ -695,6 +711,72 @@ fn sync_dependencies(
     Ok(changed)
 }
 
+/// Validate every addon's `kind` and `size` against the live provider list
+/// returned by Clever's API. Normalizes the size casing to match the canonical
+/// slug from the API (so users can write `S_BIG` and we send `s_big`, etc.).
+fn validate_addons(
+    addons: &mut IndexMap<String, Addon>,
+    providers: &[AddonProvider],
+) -> Result<()> {
+    use std::collections::HashMap;
+    let provider_by_id: HashMap<&str, &AddonProvider> =
+        providers.iter().map(|p| (p.id.as_str(), p)).collect();
+
+    for (key, addon) in addons.iter_mut() {
+        let resolved = resolve_provider(&addon.kind);
+        let provider = match provider_by_id.get(resolved) {
+            Some(p) => *p,
+            None => {
+                let mut available: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+                available.sort();
+                bail!(
+                    "addon `{key}` has unknown provider `{}` (resolved to `{resolved}`). Available providers: {}",
+                    addon.kind,
+                    available.join(", ")
+                );
+            }
+        };
+
+        if let Some(size) = addon.size.clone() {
+            let needle = size.to_lowercase();
+            let matched = provider
+                .plans
+                .iter()
+                .find(|p| p.slug.to_lowercase() == needle);
+            match matched {
+                Some(plan) => {
+                    if plan.slug != size {
+                        addon.size = Some(plan.slug.clone());
+                    }
+                }
+                None => {
+                    let mut slugs: Vec<&str> =
+                        provider.plans.iter().map(|p| p.slug.as_str()).collect();
+                    slugs.sort();
+                    bail!(
+                        "addon `{key}` has unknown size `{size}` for provider `{}`. Available sizes: {}",
+                        provider.id,
+                        slugs.join(", ")
+                    );
+                }
+            }
+        }
+
+        if let Some(region) = &addon.region {
+            if !provider.regions.iter().any(|r| r == region) {
+                let mut regs: Vec<&str> = provider.regions.iter().map(String::as_str).collect();
+                regs.sort();
+                bail!(
+                    "addon `{key}` region `{region}` is not supported by provider `{}`. Supported regions: {}",
+                    provider.id,
+                    regs.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Map a user-friendly `kind` from the project file to the provider id
 /// expected by `clever addon create`. Values not in the table pass through
 /// unchanged (so users can also write the full `xxx-addon` form directly).
@@ -764,6 +846,114 @@ mod tests {
         assert!(kinds_match("java", "jar"));
         assert!(kinds_match("node", "node"));
         assert!(!kinds_match("node", "java"));
+    }
+
+    use crate::clever::{AddonPlan, AddonProvider};
+    use indexmap::IndexMap;
+
+    fn pg_provider() -> AddonProvider {
+        AddonProvider {
+            id: "postgresql-addon".to_string(),
+            name: "PostgreSQL".to_string(),
+            regions: vec!["par".to_string(), "rbx".to_string()],
+            plans: vec![
+                AddonPlan {
+                    slug: "xs_sml".to_string(),
+                    name: "XS Small Space".to_string(),
+                },
+                AddonPlan {
+                    slug: "s_big".to_string(),
+                    name: "S Big Space".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn cellar_provider() -> AddonProvider {
+        AddonProvider {
+            id: "cellar-addon".to_string(),
+            name: "Cellar".to_string(),
+            regions: vec!["par".to_string()],
+            plans: vec![AddonPlan {
+                slug: "S".to_string(),
+                name: "S".to_string(),
+            }],
+        }
+    }
+
+    fn build_addons(
+        entries: &[(&str, &str, Option<&str>, Option<&str>)],
+    ) -> IndexMap<String, Addon> {
+        let mut out = IndexMap::new();
+        for (key, kind, size, region) in entries {
+            out.insert(
+                key.to_string(),
+                Addon {
+                    name: format!("{key}-name"),
+                    kind: kind.to_string(),
+                    size: size.map(str::to_string),
+                    crypted: false,
+                    region: region.map(str::to_string),
+                    version: None,
+                    backup_path: None,
+                },
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn validate_addons_unknown_kind() {
+        let providers = vec![pg_provider()];
+        let mut addons = build_addons(&[("db", "unknownkind", None, None)]);
+        let err = validate_addons(&mut addons, &providers).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unknown provider"));
+        assert!(msg.contains("postgresql-addon"));
+    }
+
+    #[test]
+    fn validate_addons_unknown_size() {
+        let providers = vec![pg_provider()];
+        let mut addons = build_addons(&[("db", "postgresql", Some("xxl_giant"), None)]);
+        let err = validate_addons(&mut addons, &providers).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("xxl_giant"));
+        assert!(msg.contains("xs_sml"));
+    }
+
+    #[test]
+    fn validate_addons_normalises_size_casing() {
+        let providers = vec![pg_provider()];
+        let mut addons = build_addons(&[("db", "postgresql", Some("S_BIG"), None)]);
+        validate_addons(&mut addons, &providers).unwrap();
+        assert_eq!(addons.get("db").unwrap().size.as_deref(), Some("s_big"));
+    }
+
+    #[test]
+    fn validate_addons_preserves_uppercase_when_canonical() {
+        let providers = vec![cellar_provider()];
+        let mut addons = build_addons(&[("c", "cellar", Some("s"), None)]);
+        validate_addons(&mut addons, &providers).unwrap();
+        // canonical slug is uppercase "S"
+        assert_eq!(addons.get("c").unwrap().size.as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn validate_addons_rejects_unsupported_region() {
+        let providers = vec![pg_provider()];
+        let mut addons = build_addons(&[("db", "postgresql", None, Some("syd"))]);
+        let err = validate_addons(&mut addons, &providers).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("syd"));
+        assert!(msg.contains("Supported regions"));
+    }
+
+    #[test]
+    fn validate_addons_accepts_size_omitted() {
+        let providers = vec![pg_provider()];
+        let mut addons = build_addons(&[("db", "postgresql", None, None)]);
+        validate_addons(&mut addons, &providers).unwrap();
     }
 
     #[test]
