@@ -9,6 +9,7 @@ use crate::clever::{
 };
 use crate::cli::ApplyArgs;
 use crate::commands::{OrgCache, resolve_project_file};
+use crate::issues::{self, Issue, IssueSink};
 use crate::model::{Addon, App, NetworkGroup, Project, Source};
 use crate::state::{ResourceKind, State, StateResource};
 use indexmap::IndexMap;
@@ -40,6 +41,8 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         info!("[dry-run] no mutations will be sent to Clever Cloud");
     }
 
+    let mut live_issues: Vec<Issue> = Vec::new();
+
     // Validate every addon spec against the live list of providers/plans
     // from the Clever API. Catches typos in `kind` and `size` (including
     // case) before any mutation goes out. Skipped if the project has no
@@ -52,7 +55,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
                 project.org
             )
         })?;
-        validate_addons(&mut project.addons, &providers)?;
+        validate_addons(&mut project.addons, &providers, &mut live_issues);
     }
 
     // Validate app scaling sizes against the live instance catalog. Only
@@ -71,7 +74,11 @@ pub fn run(args: ApplyArgs) -> Result<()> {
                 project.org
             )
         })?;
-        validate_app_scaling(&mut project.apps, &instances)?;
+        validate_app_scaling(&mut project.apps, &instances, &mut live_issues);
+    }
+
+    if !live_issues.is_empty() {
+        bail!("{}", issues::render(&live_issues));
     }
 
     let mut state = State::load(&file)?;
@@ -791,7 +798,8 @@ fn sync_dependencies(
 pub(crate) fn validate_app_scaling(
     apps: &mut IndexMap<String, App>,
     instances: &[AppInstance],
-) -> Result<()> {
+    issues: &mut Vec<Issue>,
+) {
     use std::collections::HashMap;
     let by_slug: HashMap<&str, &AppInstance> = instances
         .iter()
@@ -806,11 +814,12 @@ pub(crate) fn validate_app_scaling(
                     instances.iter().map(|i| i.variant.slug.as_str()).collect();
                 available.sort();
                 available.dedup();
-                bail!(
+                issues.push_issue(format!(
                     "app `{key}` has unknown kind `{}` (not in Clever's instance catalog). Known kinds: {}",
                     app.kind,
                     available.join(", ")
-                );
+                ));
+                continue;
             }
         };
 
@@ -821,10 +830,9 @@ pub(crate) fn validate_app_scaling(
             continue;
         };
 
-        normalize_flavor(&mut ins.min_size, key, &app.kind, instance)?;
-        normalize_flavor(&mut ins.max_size, key, &app.kind, instance)?;
+        normalize_flavor(&mut ins.min_size, key, &app.kind, instance, issues);
+        normalize_flavor(&mut ins.max_size, key, &app.kind, instance, issues);
     }
-    Ok(())
 }
 
 fn normalize_flavor(
@@ -832,9 +840,10 @@ fn normalize_flavor(
     key: &str,
     kind: &str,
     instance: &AppInstance,
-) -> Result<()> {
+    issues: &mut Vec<Issue>,
+) {
     let Some(value) = size.as_mut() else {
-        return Ok(());
+        return;
     };
     let needle = value.to_lowercase();
     let matched = instance
@@ -846,14 +855,13 @@ fn normalize_flavor(
             if flavor.name != *value {
                 *value = flavor.name.clone();
             }
-            Ok(())
         }
         None => {
             let available: Vec<&str> = instance.flavors.iter().map(|f| f.name.as_str()).collect();
-            bail!(
+            issues.push_issue(format!(
                 "app `{key}` size `{value}` is not a valid flavor for kind `{kind}`. Available sizes: {}",
                 available.join(", ")
-            );
+            ));
         }
     }
 }
@@ -864,7 +872,8 @@ fn normalize_flavor(
 pub(crate) fn validate_addons(
     addons: &mut IndexMap<String, Addon>,
     providers: &[AddonProvider],
-) -> Result<()> {
+    issues: &mut Vec<Issue>,
+) {
     use std::collections::HashMap;
     let provider_by_id: HashMap<&str, &AddonProvider> =
         providers.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -876,11 +885,12 @@ pub(crate) fn validate_addons(
             None => {
                 let mut available: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
                 available.sort();
-                bail!(
+                issues.push_issue(format!(
                     "addon `{key}` has unknown provider `{}` (resolved to `{resolved}`). Available providers: {}",
                     addon.kind,
                     available.join(", ")
-                );
+                ));
+                continue;
             }
         };
 
@@ -900,11 +910,11 @@ pub(crate) fn validate_addons(
                     let mut slugs: Vec<&str> =
                         provider.plans.iter().map(|p| p.slug.as_str()).collect();
                     slugs.sort();
-                    bail!(
+                    issues.push_issue(format!(
                         "addon `{key}` has unknown size `{size}` for provider `{}`. Available sizes: {}",
                         provider.id,
                         slugs.join(", ")
-                    );
+                    ));
                 }
             }
         }
@@ -913,15 +923,14 @@ pub(crate) fn validate_addons(
             if !provider.regions.iter().any(|r| r == region) {
                 let mut regs: Vec<&str> = provider.regions.iter().map(String::as_str).collect();
                 regs.sort();
-                bail!(
+                issues.push_issue(format!(
                     "addon `{key}` region `{region}` is not supported by provider `{}`. Supported regions: {}",
                     provider.id,
                     regs.join(", ")
-                );
+                ));
             }
         }
     }
-    Ok(())
 }
 
 /// Map a user-friendly `kind` from the project file to the provider id
@@ -1196,27 +1205,31 @@ mod tests {
     fn validate_addons_unknown_kind() {
         let providers = vec![pg_provider()];
         let mut addons = build_addons(&[("db", "unknownkind", None, None)]);
-        let err = validate_addons(&mut addons, &providers).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("unknown provider"));
-        assert!(msg.contains("postgresql-addon"));
+        let mut issues = Vec::new();
+        validate_addons(&mut addons, &providers, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("unknown provider"));
+        assert!(issues[0].message.contains("postgresql-addon"));
     }
 
     #[test]
     fn validate_addons_unknown_size() {
         let providers = vec![pg_provider()];
         let mut addons = build_addons(&[("db", "postgresql", Some("xxl_giant"), None)]);
-        let err = validate_addons(&mut addons, &providers).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("xxl_giant"));
-        assert!(msg.contains("xs_sml"));
+        let mut issues = Vec::new();
+        validate_addons(&mut addons, &providers, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("xxl_giant"));
+        assert!(issues[0].message.contains("xs_sml"));
     }
 
     #[test]
     fn validate_addons_normalises_size_casing() {
         let providers = vec![pg_provider()];
         let mut addons = build_addons(&[("db", "postgresql", Some("S_BIG"), None)]);
-        validate_addons(&mut addons, &providers).unwrap();
+        let mut issues = Vec::new();
+        validate_addons(&mut addons, &providers, &mut issues);
+        assert!(issues.is_empty());
         assert_eq!(addons.get("db").unwrap().size.as_deref(), Some("s_big"));
     }
 
@@ -1224,7 +1237,9 @@ mod tests {
     fn validate_addons_preserves_uppercase_when_canonical() {
         let providers = vec![cellar_provider()];
         let mut addons = build_addons(&[("c", "cellar", Some("s"), None)]);
-        validate_addons(&mut addons, &providers).unwrap();
+        let mut issues = Vec::new();
+        validate_addons(&mut addons, &providers, &mut issues);
+        assert!(issues.is_empty());
         // canonical slug is uppercase "S"
         assert_eq!(addons.get("c").unwrap().size.as_deref(), Some("S"));
     }
@@ -1233,10 +1248,24 @@ mod tests {
     fn validate_addons_rejects_unsupported_region() {
         let providers = vec![pg_provider()];
         let mut addons = build_addons(&[("db", "postgresql", None, Some("syd"))]);
-        let err = validate_addons(&mut addons, &providers).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("syd"));
-        assert!(msg.contains("Supported regions"));
+        let mut issues = Vec::new();
+        validate_addons(&mut addons, &providers, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("syd"));
+        assert!(issues[0].message.contains("Supported regions"));
+    }
+
+    #[test]
+    fn validate_addons_accumulates_multiple_issues() {
+        let providers = vec![pg_provider()];
+        let mut addons = build_addons(&[
+            ("a", "unknownkind", None, None),
+            ("b", "postgresql", Some("huge"), None),
+            ("c", "postgresql", None, Some("syd")),
+        ]);
+        let mut issues = Vec::new();
+        validate_addons(&mut addons, &providers, &mut issues);
+        assert_eq!(issues.len(), 3);
     }
 
     fn node_instance() -> AppInstance {
@@ -1290,11 +1319,12 @@ mod tests {
         let instances = vec![node_instance()];
         let mut apps = IndexMap::new();
         apps.insert("a".to_string(), app_with_scaling("cobol", Some("S"), None));
-        let err = validate_app_scaling(&mut apps, &instances).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("cobol"));
-        assert!(msg.contains("Known kinds"));
-        assert!(msg.contains("node"));
+        let mut issues = Vec::new();
+        validate_app_scaling(&mut apps, &instances, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("cobol"));
+        assert!(issues[0].message.contains("Known kinds"));
+        assert!(issues[0].message.contains("node"));
     }
 
     #[test]
@@ -1305,10 +1335,11 @@ mod tests {
             "a".to_string(),
             app_with_scaling("node", Some("HUGE"), None),
         );
-        let err = validate_app_scaling(&mut apps, &instances).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("HUGE"));
-        assert!(msg.contains("Available sizes"));
+        let mut issues = Vec::new();
+        validate_app_scaling(&mut apps, &instances, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("HUGE"));
+        assert!(issues[0].message.contains("Available sizes"));
     }
 
     #[test]
@@ -1319,7 +1350,9 @@ mod tests {
             "a".to_string(),
             app_with_scaling("node", Some("s"), Some("m")),
         );
-        validate_app_scaling(&mut apps, &instances).unwrap();
+        let mut issues = Vec::new();
+        validate_app_scaling(&mut apps, &instances, &mut issues);
+        assert!(issues.is_empty());
         let scale = apps.get("a").unwrap().scalability.as_ref().unwrap();
         let ins = scale.instances.as_ref().unwrap();
         assert_eq!(ins.min_size.as_deref(), Some("S"));
@@ -1344,14 +1377,31 @@ mod tests {
                 env: IndexMap::new(),
             },
         );
-        validate_app_scaling(&mut apps, &instances).unwrap();
+        let mut issues = Vec::new();
+        validate_app_scaling(&mut apps, &instances, &mut issues);
+        assert!(issues.is_empty());
     }
 
     #[test]
     fn validate_addons_accepts_size_omitted() {
         let providers = vec![pg_provider()];
         let mut addons = build_addons(&[("db", "postgresql", None, None)]);
-        validate_addons(&mut addons, &providers).unwrap();
+        let mut issues = Vec::new();
+        validate_addons(&mut addons, &providers, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn validate_app_scaling_accumulates_min_and_max_issues() {
+        let instances = vec![node_instance()];
+        let mut apps = IndexMap::new();
+        apps.insert(
+            "a".to_string(),
+            app_with_scaling("node", Some("HUGE"), Some("MASSIVE")),
+        );
+        let mut issues = Vec::new();
+        validate_app_scaling(&mut apps, &instances, &mut issues);
+        assert_eq!(issues.len(), 2);
     }
 
     #[test]
