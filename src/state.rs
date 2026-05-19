@@ -60,8 +60,7 @@ impl State {
     }
 
     pub fn save(&self) -> Result<()> {
-        let body = serde_json::to_string_pretty(&self.resources)
-            .context("serializing state")?;
+        let body = serde_json::to_string_pretty(&self.resources).context("serializing state")?;
         std::fs::write(&self.path, body)
             .with_context(|| format!("writing state file `{}`", self.path.display()))?;
         Ok(())
@@ -80,9 +79,11 @@ impl State {
             *existing = res;
             return;
         }
-        if let Some(existing) = self.resources.iter_mut().find(|r| {
-            r.kind == res.kind && r.name == res.name && r.org_id == res.org_id
-        }) {
+        if let Some(existing) = self
+            .resources
+            .iter_mut()
+            .find(|r| r.kind == res.kind && r.name == res.name && r.org_id == res.org_id)
+        {
             *existing = res;
             return;
         }
