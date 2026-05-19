@@ -27,6 +27,9 @@ pub enum Command {
     /// Compare a project file against the live Clever Cloud org and report
     /// any drift. Read-only; doesn't modify anything.
     Status(StatusArgs),
+    /// Scaffold a new project file by asking a few questions (or via flags
+    /// in non-interactive mode).
+    Init(InitArgs),
 }
 
 #[derive(Debug, Args)]
@@ -211,6 +214,53 @@ pub struct DeleteArgs {
     /// Plan only: log what would be deleted without mutating anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Project name (free-form). Asked interactively if omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Clever Cloud organisation id (`orga_xxx`).
+    #[arg(long)]
+    pub org: Option<String>,
+
+    /// Default region. Defaults to `par`.
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// App kind (`node`, `docker`, `python`, `jar`, ...).
+    #[arg(long)]
+    pub kind: Option<String>,
+
+    /// GitHub source. Accepts `owner/repo`, `github.com/owner/repo`, or a
+    /// full URL. Omit (or pass `--no-source` in non-interactive mode) for
+    /// no source.
+    #[arg(long)]
+    pub source: Option<String>,
+
+    /// Explicitly create the project with no source, even in interactive
+    /// mode. Useful for `--non-interactive` runs.
+    #[arg(long, conflicts_with = "source")]
+    pub no_source: bool,
+
+    /// Addon kind to provision alongside the app (repeatable). E.g.
+    /// `--addon postgresql --addon redis`.
+    #[arg(long = "addon")]
+    pub addons: Vec<String>,
+
+    /// Output path. Default `project.clever.yaml`.
+    #[arg(short = 'o', long)]
+    pub output: Option<PathBuf>,
+
+    /// Don't prompt for anything. Fail if a required field wasn't passed.
+    #[arg(long)]
+    pub non_interactive: bool,
+
+    /// Overwrite the output file if it already exists.
+    #[arg(long)]
+    pub force: bool,
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
