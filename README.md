@@ -189,6 +189,7 @@ Options:
 | `--secrets-path <FILE>` | Explicit secrets file (otherwise auto-discovered, see below) |
 | `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
 | `--yes` / `--auto-approve` | Skip the confirmation prompt. Required when stdin is not a TTY. |
+| `--target <SPEC>` | Restrict the run to one resource (repeatable). Syntax: `apps.KEY`, `addons.KEY`, `network_groups.KEY` (also `app.`, `addon.`, `ng.`). |
 | `-v, --verbose` | More log lines (`debug` level) |
 
 Apps with a GitHub `source.from` are created with `clever create --github owner/repo`. Non-GitHub sources create an empty app — push your code to the Clever remote yourself afterwards.
@@ -204,6 +205,23 @@ The default is **no** — hitting Enter aborts. Type `y` to proceed.
 - Pass `--yes` (or `--auto-approve`) to skip the prompt. This is required when stdin is not a TTY (CI environments, piped invocations): without it, apply fails loud with `stdin is not a TTY and --yes was not given`.
 - If the plan has no mutations (everything is already in sync), the prompt is skipped and apply exits 0.
 - `--dry-run` always short-circuits: it prints the plan and exits, prompt or no prompt.
+
+**Resource targeting.** Pass `--target` (repeatable) to restrict the run to a subset of the project file:
+
+```sh
+clever-project apply --target apps.api
+clever-project apply --target addons.db --target apps.worker
+```
+
+The argument is `<section>.<key>` where `<section>` is `apps`, `addons`, or `network_groups` (with `app.`, `addon.`, `ng.` accepted as shorter aliases), and `<key>` is the project key under that section (the YAML key, not the resolved `name:`). Typos fail loud at start with a list of the available keys.
+
+When `--target` is set:
+
+- Only the targeted resources go through their normal create/update path.
+- Other project resources are read-only — their ids are looked up so phase-3 dependency wiring still works, but they aren't mutated.
+- If a targeted app depends on a non-targeted resource that doesn't yet exist anywhere (state or live), apply bails with a clear message: "targeting leaves dependencies unresolved — add the missing `--target` flag, or run a full apply first."
+- Restarts (phase 5) only fire for targeted apps.
+- The plan header reports the active targets so you can double-check.
 
 **Dry-run plan.** `--dry-run` produces a Terraform-style plan instead of running the phases: the CLI snapshots the live org, computes a per-resource diff against the project file, and prints it in one block:
 
@@ -256,7 +274,7 @@ Delete the resources listed in the project file. Network groups are removed firs
 clever-project delete [FILE] [OPTIONS]
 ```
 
-Same flags as `apply` (minus `--region`), including `--yes` / `--auto-approve`.
+Same flags as `apply` (minus `--region`), including `--yes` / `--auto-approve` and `--target`. With `--target apps.api`, only that resource is queued for deletion; everything else is left alone.
 
 **Confirmation gate.** Like `apply`, `delete` prints a plan and prompts before doing anything:
 
