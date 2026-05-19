@@ -27,11 +27,11 @@ pub fn run(args: CheckArgs) -> Result<()> {
         variables.push(("env".to_string(), env));
     }
 
-    // 1. Load + resolve. Catches: YAML/JSON syntax, missing variables,
-    //    reserved variable redefinition, mixed variables shape, unknown app
-    //    kinds, unknown regions, secrets parse errors.
+    // 1. Load + resolve, but in collecting mode so that even when variables
+    //    or secrets are missing we still get a Project we can run the
+    //    cross-resource validators against.
     let file = resolve_project_file(args.file, &std::env::current_dir()?)?;
-    let (mut project, _resolver) = Project::load_and_resolve(
+    let (mut project, mut issues) = Project::load_collecting(
         &file,
         args.org,
         args.region,
@@ -39,8 +39,6 @@ pub fn run(args: CheckArgs) -> Result<()> {
         args.secrets_path.as_deref(),
     )
     .with_context(|| format!("loading project `{}`", file.display()))?;
-
-    let mut issues: Vec<Issue> = Vec::new();
 
     // 2. Static cross-resource checks.
     validate_dependencies(&project, &mut issues);
