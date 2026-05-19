@@ -26,6 +26,7 @@ use crate::commands::diff::{
     DiffBody, FieldDiff, diff_map, diff_set, kinds_equivalent, quote_escape, sizes_equivalent,
 };
 use crate::commands::live::LiveSnapshot;
+use crate::commands::targets::{TargetKind, Targets};
 use crate::model::{Addon, App, Project};
 
 #[derive(Debug, Default)]
@@ -118,11 +119,14 @@ impl Plan {
     }
 }
 
-pub fn compute(project: &Project, live: &LiveSnapshot) -> Plan {
+pub fn compute(project: &Project, live: &LiveSnapshot, targets: &Targets) -> Plan {
     let mut plan = Plan::default();
 
     // Addons first — apply's phase 1 order, and apps may reference them.
-    for (_, addon) in &project.addons {
+    for (key, addon) in &project.addons {
+        if !targets.is_targeted(TargetKind::Addon, key) {
+            continue;
+        }
         match live.addons.get(addon.name.as_str()) {
             None => plan.addons.push(AddonOp {
                 name: addon.name.clone(),
@@ -147,7 +151,10 @@ pub fn compute(project: &Project, live: &LiveSnapshot) -> Plan {
     }
 
     // Apps.
-    for (_, app) in &project.apps {
+    for (key, app) in &project.apps {
+        if !targets.is_targeted(TargetKind::App, key) {
+            continue;
+        }
         match live.apps.get(app.name.as_str()) {
             None => plan.apps.push(AppOp {
                 name: app.name.clone(),
@@ -176,7 +183,10 @@ pub fn compute(project: &Project, live: &LiveSnapshot) -> Plan {
     }
 
     // Network groups.
-    for (_, ng) in &project.network_groups {
+    for (key, ng) in &project.network_groups {
+        if !targets.is_targeted(TargetKind::NetworkGroup, key) {
+            continue;
+        }
         match live.network_groups.get(ng.name.as_str()) {
             None => plan.network_groups.push(NgOp {
                 name: ng.name.clone(),
@@ -307,7 +317,7 @@ fn diff_addon_info(
     diffs
 }
 
-pub fn render(plan: &Plan, project: &Project) -> String {
+pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
     let mut out = String::new();
 
     let mut to_create = 0;
@@ -339,6 +349,9 @@ pub fn render(plan: &Plan, project: &Project) -> String {
         "Plan for project `{}` against org `{}` (default region `{}`):",
         project.name, project.org, project.region
     );
+    if !targets.is_empty() {
+        let _ = writeln!(out, "  {}", targets.label());
+    }
     let _ = writeln!(
         out,
         "  {to_create} to create, {to_update} to update, {unchanged} unchanged."
@@ -607,7 +620,7 @@ mod tests {
 
     #[test]
     fn empty_plan_is_empty() {
-        let p = compute(&empty_project(), &empty_live());
+        let p = compute(&empty_project(), &empty_live(), &Targets::default());
         assert_eq!(p.mutation_count(), 0);
     }
 
@@ -623,7 +636,7 @@ mod tests {
         api.domains.push("api.example.com".into());
         project.apps.insert("api".into(), api);
 
-        let plan = compute(&project, &empty_live());
+        let plan = compute(&project, &empty_live(), &Targets::default());
         assert_eq!(plan.apps.len(), 1);
         match &plan.apps[0].kind {
             AppOpKind::Create {
@@ -652,7 +665,7 @@ mod tests {
         let mut live = empty_live();
         live.apps
             .insert("prod-api".into(), make_app("prod-api", "node"));
-        let plan = compute(&project, &live);
+        let plan = compute(&project, &live, &Targets::default());
         match &plan.apps[0].kind {
             AppOpKind::Existing {
                 mutations,
@@ -679,7 +692,7 @@ mod tests {
         live_api.env.insert("OLD".into(), "true".into());
         live.apps.insert("prod-api".into(), live_api);
 
-        let plan = compute(&project, &live);
+        let plan = compute(&project, &live, &Targets::default());
         match &plan.apps[0].kind {
             AppOpKind::Existing { mutations, .. } => {
                 assert!(mutations.iter().any(|d| d.field == "env"));
@@ -700,7 +713,7 @@ mod tests {
         live_api.domains.push("prod-api.cleverapps.io".into());
         live.apps.insert("prod-api".into(), live_api);
 
-        let plan = compute(&project, &live);
+        let plan = compute(&project, &live, &Targets::default());
         match &plan.apps[0].kind {
             AppOpKind::Existing { mutations, .. } => {
                 assert!(
@@ -722,7 +735,7 @@ mod tests {
         live.apps
             .insert("prod-api".into(), make_app("prod-api", "node"));
 
-        let plan = compute(&project, &live);
+        let plan = compute(&project, &live, &Targets::default());
         match &plan.apps[0].kind {
             AppOpKind::Existing {
                 mutations,
@@ -744,7 +757,7 @@ mod tests {
             "db".into(),
             make_addon("prod-db", "postgresql", Some("xs_sml")),
         );
-        let plan = compute(&project, &empty_live());
+        let plan = compute(&project, &empty_live(), &Targets::default());
         assert_eq!(plan.addons.len(), 1);
         match &plan.addons[0].kind {
             AddonOpKind::Create {
@@ -772,7 +785,7 @@ mod tests {
             "prod-db".into(),
             make_addon("prod-db", "postgresql", Some("xs_sml")),
         );
-        let plan = compute(&project, &live);
+        let plan = compute(&project, &live, &Targets::default());
         match &plan.addons[0].kind {
             AddonOpKind::Existing { drift } => {
                 assert!(drift.iter().any(|d| d.field == "size"));
@@ -803,7 +816,7 @@ mod tests {
                 link: vec!["api".into()],
             },
         );
-        let plan = compute(&project, &live);
+        let plan = compute(&project, &live, &Targets::default());
         match &plan.network_groups[0].kind {
             NgOpKind::Existing { mutations } => {
                 assert!(mutations.iter().any(|d| d.field == "members"));
@@ -811,6 +824,64 @@ mod tests {
             _ => panic!(),
         }
         assert_eq!(plan.mutation_count(), 1);
+    }
+
+    #[test]
+    fn targeting_filters_to_one_app() {
+        let mut project = empty_project();
+        project
+            .apps
+            .insert("api".into(), make_app("prod-api", "node"));
+        project
+            .apps
+            .insert("worker".into(), make_app("prod-worker", "node"));
+        project
+            .addons
+            .insert("db".into(), make_addon("prod-db", "postgresql", None));
+        let live = empty_live();
+        let mut targets = Targets::default();
+        targets.apps.insert("api".into());
+
+        let plan = compute(&project, &live, &targets);
+        assert_eq!(plan.apps.len(), 1);
+        assert_eq!(plan.apps[0].name, "prod-api");
+        assert!(plan.addons.is_empty());
+    }
+
+    #[test]
+    fn targeting_addon_and_app_includes_both() {
+        let mut project = empty_project();
+        project
+            .apps
+            .insert("api".into(), make_app("prod-api", "node"));
+        project
+            .addons
+            .insert("db".into(), make_addon("prod-db", "postgresql", None));
+        project
+            .addons
+            .insert("cache".into(), make_addon("prod-cache", "redis", None));
+        let live = empty_live();
+        let mut targets = Targets::default();
+        targets.apps.insert("api".into());
+        targets.addons.insert("db".into());
+
+        let plan = compute(&project, &live, &targets);
+        assert_eq!(plan.addons.len(), 1);
+        assert_eq!(plan.addons[0].name, "prod-db");
+        assert_eq!(plan.apps.len(), 1);
+    }
+
+    #[test]
+    fn render_with_targets_shows_label() {
+        let mut project = empty_project();
+        project
+            .apps
+            .insert("api".into(), make_app("prod-api", "node"));
+        let mut targets = Targets::default();
+        targets.apps.insert("api".into());
+        let plan = compute(&project, &empty_live(), &targets);
+        let s = render(&plan, &project, &targets);
+        assert!(s.contains("(targeting: apps.api)"));
     }
 
     #[test]
@@ -829,8 +900,8 @@ mod tests {
         live_db.size = Some("xs_sml".into());
         live.addons.insert("prod-db".into(), live_db);
 
-        let plan = compute(&project, &live);
-        let s = render(&plan, &project);
+        let plan = compute(&project, &live, &Targets::default());
+        let s = render(&plan, &project, &Targets::default());
         // 1 app to create + 0 addon (synced) + 0 NG = 1 create, 0 update, 1 unchanged.
         assert!(s.contains("1 to create, 0 to update, 1 unchanged"));
         assert!(s.contains("+ app \"prod-api\""));
