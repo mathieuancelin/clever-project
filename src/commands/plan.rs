@@ -21,6 +21,7 @@
 use std::fmt::Write;
 
 use indexmap::IndexMap;
+use serde::Serialize;
 
 use crate::commands::diff::{
     DiffBody, FieldDiff, diff_map, diff_set, kinds_equivalent, quote_escape, sizes_equivalent,
@@ -29,24 +30,27 @@ use crate::commands::live::LiveSnapshot;
 use crate::commands::targets::{TargetKind, Targets};
 use crate::model::{Addon, App, Project};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct Plan {
     pub apps: Vec<AppOp>,
     pub addons: Vec<AddonOp>,
     pub network_groups: Vec<NgOp>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct AppOp {
     pub name: String,
+    #[serde(flatten)]
     pub kind: AppOpKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum AppOpKind {
     Create {
         kind: String,
         region: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         source: Option<String>,
         env: IndexMap<String, String>,
         domains: Vec<String>,
@@ -61,16 +65,19 @@ pub enum AppOpKind {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct AddonOp {
     pub name: String,
+    #[serde(flatten)]
     pub kind: AddonOpKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum AddonOpKind {
     Create {
         provider: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<String>,
         region: String,
     },
@@ -79,13 +86,15 @@ pub enum AddonOpKind {
     Existing { drift: Vec<FieldDiff> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct NgOp {
     pub name: String,
+    #[serde(flatten)]
     pub kind: NgOpKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum NgOpKind {
     Create { members: Vec<String> },
     Existing { mutations: Vec<FieldDiff> },
@@ -317,6 +326,84 @@ fn diff_addon_info(
     diffs
 }
 
+/// JSON-serializable wrapper: plan + project context + summary counts +
+/// active targets. The shape is stable and meant to be consumed by `jq`
+/// or CI tooling.
+#[derive(Debug, Serialize)]
+pub struct PlanJson<'a> {
+    pub project: &'a str,
+    pub org: &'a str,
+    pub region: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targeting: Vec<String>,
+    pub summary: PlanSummary,
+    pub apps: &'a [AppOp],
+    pub addons: &'a [AddonOp],
+    pub network_groups: &'a [NgOp],
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlanSummary {
+    pub to_create: usize,
+    pub to_update: usize,
+    pub unchanged: usize,
+}
+
+pub fn to_json<'a>(plan: &'a Plan, project: &'a Project, targets: &Targets) -> PlanJson<'a> {
+    let mut summary = PlanSummary {
+        to_create: 0,
+        to_update: 0,
+        unchanged: 0,
+    };
+    for o in &plan.apps {
+        match &o.kind {
+            AppOpKind::Create { .. } => summary.to_create += 1,
+            AppOpKind::Existing { mutations, .. } if !mutations.is_empty() => {
+                summary.to_update += 1
+            }
+            AppOpKind::Existing { .. } => summary.unchanged += 1,
+        }
+    }
+    for o in &plan.addons {
+        match &o.kind {
+            AddonOpKind::Create { .. } => summary.to_create += 1,
+            AddonOpKind::Existing { .. } => summary.unchanged += 1,
+        }
+    }
+    for o in &plan.network_groups {
+        match &o.kind {
+            NgOpKind::Create { .. } => summary.to_create += 1,
+            NgOpKind::Existing { mutations } if !mutations.is_empty() => summary.to_update += 1,
+            NgOpKind::Existing { .. } => summary.unchanged += 1,
+        }
+    }
+    let targeting = if targets.is_empty() {
+        Vec::new()
+    } else {
+        let mut v: Vec<String> = Vec::new();
+        for k in &targets.apps {
+            v.push(format!("apps.{k}"));
+        }
+        for k in &targets.addons {
+            v.push(format!("addons.{k}"));
+        }
+        for k in &targets.network_groups {
+            v.push(format!("network_groups.{k}"));
+        }
+        v
+    };
+    PlanJson {
+        project: &project.name,
+        org: &project.org,
+        region: &project.region,
+        targeting,
+        summary,
+        apps: &plan.apps,
+        addons: &plan.addons,
+        network_groups: &plan.network_groups,
+    }
+}
+
 pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
     let mut out = String::new();
 
@@ -509,13 +596,13 @@ fn render_field(out: &mut String, diff: &FieldDiff) {
                 quote_escape(file)
             );
         }
-        DiffBody::Set(entries) => {
+        DiffBody::Set { entries } => {
             let _ = writeln!(out, "      {}:", diff.field);
             for e in entries {
                 let _ = writeln!(out, "        {} {}", e.op, e.value);
             }
         }
-        DiffBody::Map(entries) => {
+        DiffBody::Map { entries } => {
             let _ = writeln!(out, "      {}:", diff.field);
             for e in entries {
                 match e.op {
@@ -885,6 +972,42 @@ mod tests {
         let plan = compute(&project, &empty_live(), &targets);
         let s = render(&plan, &project, &targets);
         assert!(s.contains("(targeting: apps.api)"));
+    }
+
+    #[test]
+    fn json_payload_shape() {
+        let mut project = empty_project();
+        project
+            .apps
+            .insert("api".into(), make_app("prod-api", "node"));
+        project.addons.insert(
+            "db".into(),
+            make_addon("prod-db", "postgresql", Some("xs_sml")),
+        );
+        let plan = compute(&project, &empty_live(), &Targets::default());
+        let payload = to_json(&plan, &project, &Targets::default());
+        let s = serde_json::to_string(&payload).unwrap();
+        // Header fields surface as expected.
+        assert!(s.contains("\"project\":\"p\""));
+        assert!(s.contains("\"to_create\":2"));
+        // Each resource has an `op` tag and a name.
+        assert!(s.contains("\"op\":\"create\""));
+        assert!(s.contains("\"name\":\"prod-api\""));
+        assert!(s.contains("\"name\":\"prod-db\""));
+    }
+
+    #[test]
+    fn json_payload_with_targets_lists_them() {
+        let mut project = empty_project();
+        project
+            .apps
+            .insert("api".into(), make_app("prod-api", "node"));
+        let mut targets = Targets::default();
+        targets.apps.insert("api".into());
+        let plan = compute(&project, &empty_live(), &targets);
+        let payload = to_json(&plan, &project, &targets);
+        let s = serde_json::to_string(&payload).unwrap();
+        assert!(s.contains("\"targeting\":[\"apps.api\"]"));
     }
 
     #[test]
