@@ -1,7 +1,9 @@
 pub mod apply;
 pub mod check;
 pub mod delete;
+pub mod live;
 pub mod read;
+pub mod status;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
