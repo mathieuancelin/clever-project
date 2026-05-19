@@ -5,7 +5,9 @@ use tracing::{info, warn};
 
 use crate::cli::ApplyArgs;
 use crate::clever::{Clever, CreateAddon, CreateApp, ListedAddon, ListedApp};
+use crate::commands::OrgCache;
 use crate::model::{App, Project, Source};
+use crate::state::{ResourceKind, State, StateResource};
 
 pub fn run(args: ApplyArgs) -> Result<()> {
     let mut variables: Vec<(String, String)> = Vec::new();
@@ -33,137 +35,381 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         info!("[dry-run] no mutations will be sent to Clever Cloud");
     }
 
-    // Snapshot existing state in the org.
-    let mut existing_apps: HashMap<String, ListedApp> = clever
-        .list_apps(&project.org)?
-        .into_iter()
-        .map(|a| (a.name.clone(), a))
-        .collect();
-    let mut existing_addons: HashMap<String, ListedAddon> = clever
-        .list_addons(&project.org)?
-        .into_iter()
-        .map(|a| (a.name.clone(), a))
-        .collect();
+    let mut state = State::load(&args.file)?;
+    let effective_env = variables
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "env")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "prod".to_string());
 
-    // Phase 1 — addons. Create missing ones, warn (no update) on existing.
+    let mut cache = OrgCache::new();
+
+    // Phase 1 — addons.
     let mut addon_id_by_key: HashMap<String, String> = HashMap::new();
     for (key, addon) in &project.addons {
-        match existing_addons.remove(&addon.name) {
-            Some(found) => {
-                let resolved = resolve_provider(&addon.kind);
-                if !found.provider_id.eq_ignore_ascii_case(resolved)
-                    && !found.kind.eq_ignore_ascii_case(&addon.kind)
-                {
-                    warn!(
-                        "addon `{}` exists with provider `{}` but project declares `{}` — leaving as-is",
-                        addon.name, found.provider_id, addon.kind
-                    );
-                }
-                info!(
-                    "addon `{}` already exists ({}), leaving untouched [project key: {key}]",
-                    addon.name, found.addon_id
-                );
-                addon_id_by_key.insert(key.clone(), found.addon_id);
-            }
-            None => {
-                let region = addon.region.as_deref().unwrap_or(&project.region);
-                let version_string = addon
-                    .version
-                    .as_ref()
-                    .map(yaml_scalar_to_string)
-                    .transpose()?;
-                let provider = resolve_provider(&addon.kind);
-                info!("creating addon `{}` [project key: {key}]", addon.name);
-                let id = clever.create_addon(&CreateAddon {
-                    provider,
-                    name: &addon.name,
-                    org: &project.org,
-                    region,
-                    plan: addon.size.as_deref(),
-                    version: version_string.as_deref(),
-                    crypted: addon.crypted,
-                })?;
-                addon_id_by_key.insert(key.clone(), id);
-            }
-        }
+        let id = handle_addon(
+            &clever,
+            &mut state,
+            &mut cache,
+            &project,
+            &effective_env,
+            key,
+            addon,
+        )?;
+        addon_id_by_key.insert(key.clone(), id);
     }
 
-    // Phase 2 — apps. Create missing, update existing iff kind+source match.
+    // Phase 2 — apps.
     let mut app_id_by_key: HashMap<String, String> = HashMap::new();
     let mut apps_to_link: Vec<(String, &App)> = Vec::new();
 
     for (key, app) in &project.apps {
-        let region = app.region.as_deref().unwrap_or(&project.region);
-
-        let app_id = match existing_apps.remove(&app.name) {
-            Some(found) => {
-                if !kinds_match(&found.kind, &app.kind) {
-                    warn!(
-                        "app `{}` exists with kind `{}` but project declares `{}` — skipping update",
-                        app.name, found.kind, app.kind
-                    );
-                    found.app_id
-                } else if !source_matches(found.deploy_url.as_deref(), app.source.as_ref()) {
-                    warn!(
-                        "app `{}` source diverges (clever: {:?}, project: {:?}) — skipping update",
-                        app.name, found.deploy_url, app.source
-                    );
-                    found.app_id
-                } else {
-                    info!(
-                        "updating app `{}` ({}) [project key: {key}]",
-                        app.name, found.app_id
-                    );
-                    update_app(&clever, &found.app_id, app)?;
-                    found.app_id
-                }
-            }
-            None => {
-                info!("creating app `{}` [project key: {key}]", app.name);
-                let github = app
-                    .source
-                    .as_ref()
-                    .map(|s| parse_github(&s.from))
-                    .transpose()?
-                    .flatten();
-                let id = clever.create_app(&CreateApp {
-                    name: &app.name,
-                    kind: &app.kind,
-                    org: &project.org,
-                    region,
-                    github: github.as_deref(),
-                })?;
-                if app.source.is_some() && github.is_none() {
-                    warn!(
-                        "app `{}` source is not a github URL — app created empty, you'll need to deploy the code manually",
-                        app.name
-                    );
-                }
-                update_app(&clever, &id, app)?;
-                id
-            }
-        };
-
-        app_id_by_key.insert(key.clone(), app_id);
+        let id = handle_app(
+            &clever,
+            &mut state,
+            &mut cache,
+            &project,
+            &effective_env,
+            key,
+            app,
+        )?;
+        app_id_by_key.insert(key.clone(), id);
         apps_to_link.push((key.clone(), app));
     }
 
-    // Phase 3 — service links. Resolve project keys -> ids, diff against
-    // currently linked services, link/unlink to converge.
-    for (key, app) in &apps_to_link {
-        let app_id = &app_id_by_key[key];
-        sync_dependencies(
+    // Phase 3 — service links. Wrapped in a one-shot retry: if anything
+    // fails (likely due to a stale id pulled from state), refresh state
+    // against fresh listings, rebuild the dep maps, and try again.
+    let phase3 = || -> Result<()> {
+        for (key, app) in &apps_to_link {
+            let app_id = &app_id_by_key[key];
+            sync_dependencies(
+                &clever,
+                app_id,
+                &app.dependencies,
+                &app_id_by_key,
+                &addon_id_by_key,
+                &project,
+            )
+            .with_context(|| format!("syncing dependencies of app `{}`", app.name))?;
+        }
+        Ok(())
+    };
+
+    if let Err(e) = phase3() {
+        warn!(
+            "phase 3 (service links) failed: {e:#} — refreshing state against clever and retrying once"
+        );
+        refresh_dep_maps(
             &clever,
-            app_id,
-            &app.dependencies,
-            &app_id_by_key,
-            &addon_id_by_key,
+            &mut state,
+            &mut cache,
             &project,
-        )
-        .with_context(|| format!("syncing dependencies of app `{}`", app.name))?;
+            &effective_env,
+            &mut app_id_by_key,
+            &mut addon_id_by_key,
+        )?;
+        // Persist whatever the refresh learned, so the next run starts clean
+        // even if the retry below still fails.
+        if !clever.is_dry_run() {
+            state
+                .save()
+                .with_context(|| format!("saving state file `{}`", state.path().display()))?;
+        }
+        for (key, app) in &apps_to_link {
+            let app_id = &app_id_by_key[key];
+            sync_dependencies(
+                &clever,
+                app_id,
+                &app.dependencies,
+                &app_id_by_key,
+                &addon_id_by_key,
+                &project,
+            )
+            .with_context(|| format!("syncing dependencies of app `{}` (retry)", app.name))?;
+        }
+    }
+
+    if !clever.is_dry_run() {
+        state
+            .save()
+            .with_context(|| format!("saving state file `{}`", state.path().display()))?;
     }
 
     info!("apply complete");
+    Ok(())
+}
+
+fn handle_addon(
+    clever: &Clever,
+    state: &mut State,
+    cache: &mut OrgCache,
+    project: &Project,
+    env: &str,
+    key: &str,
+    addon: &crate::model::Addon,
+) -> Result<String> {
+    // State first. Addons aren't updated, so there's no operation we could
+    // use to validate the entry — staleness will surface in phase 3 if
+    // someone tries to link this addon, and we retry there.
+    if let Some(r) = state.find(ResourceKind::Addon, &addon.name, &project.org) {
+        info!(
+            "addon `{}` known from state ({}), leaving untouched [project key: {key}]",
+            addon.name, r.id
+        );
+        return Ok(r.id.clone());
+    }
+
+    // Listing path.
+    let region = addon.region.as_deref().unwrap_or(&project.region);
+    let listed = cache.addons(clever, &project.org)?;
+    if let Some(found) = listed.get(&addon.name).cloned() {
+        let resolved = resolve_provider(&addon.kind);
+        if !found.provider_id.eq_ignore_ascii_case(resolved)
+            && !found.kind.eq_ignore_ascii_case(&addon.kind)
+        {
+            warn!(
+                "addon `{}` exists with provider `{}` but project declares `{}` — leaving as-is",
+                addon.name, found.provider_id, addon.kind
+            );
+        }
+        info!(
+            "addon `{}` already exists ({}), leaving untouched [project key: {key}]",
+            addon.name, found.addon_id
+        );
+        if !clever.is_dry_run() {
+            state.upsert(StateResource {
+                kind: ResourceKind::Addon,
+                id: found.addon_id.clone(),
+                org_id: project.org.clone(),
+                region: found.region.clone(),
+                env: env.to_string(),
+                name: addon.name.clone(),
+            });
+        }
+        return Ok(found.addon_id);
+    }
+
+    // Create.
+    let version_string = addon
+        .version
+        .as_ref()
+        .map(yaml_scalar_to_string)
+        .transpose()?;
+    let provider = resolve_provider(&addon.kind);
+    info!("creating addon `{}` [project key: {key}]", addon.name);
+    let id = clever.create_addon(&CreateAddon {
+        provider,
+        name: &addon.name,
+        org: &project.org,
+        region,
+        plan: addon.size.as_deref(),
+        version: version_string.as_deref(),
+        crypted: addon.crypted,
+    })?;
+    if !clever.is_dry_run() {
+        state.upsert(StateResource {
+            kind: ResourceKind::Addon,
+            id: id.clone(),
+            org_id: project.org.clone(),
+            region: region.to_string(),
+            env: env.to_string(),
+            name: addon.name.clone(),
+        });
+    }
+    Ok(id)
+}
+
+fn handle_app(
+    clever: &Clever,
+    state: &mut State,
+    cache: &mut OrgCache,
+    project: &Project,
+    env: &str,
+    key: &str,
+    app: &App,
+) -> Result<String> {
+    // State first. We validate the entry by running update_app — if any
+    // call there fails (typically because the id no longer exists), drop
+    // the state entry, invalidate the cache, and fall through to the
+    // listing path.
+    if let Some(r) = state.find(ResourceKind::App, &app.name, &project.org) {
+        let id = r.id.clone();
+        info!(
+            "updating app `{}` (from state, {id}) [project key: {key}]",
+            app.name
+        );
+        match update_app(clever, &id, app) {
+            Ok(()) => return Ok(id),
+            Err(e) => {
+                warn!(
+                    "state hit for app `{}` (id={id}) but update failed: {e:#} — dropping stale state entry and refreshing from clever",
+                    app.name
+                );
+                state.remove_by_id(&id);
+                cache.invalidate();
+            }
+        }
+    }
+
+    let region = app.region.as_deref().unwrap_or(&project.region);
+    let listed = cache.apps(clever, &project.org)?;
+    if let Some(found) = listed.get(&app.name).cloned() {
+        if !kinds_match(&found.kind, &app.kind) {
+            warn!(
+                "app `{}` exists with kind `{}` but project declares `{}` — skipping update",
+                app.name, found.kind, app.kind
+            );
+            return Ok(found.app_id);
+        }
+        if !source_matches(found.deploy_url.as_deref(), app.source.as_ref()) {
+            warn!(
+                "app `{}` source diverges (clever: {:?}, project: {:?}) — skipping update",
+                app.name, found.deploy_url, app.source
+            );
+            return Ok(found.app_id);
+        }
+        info!(
+            "updating app `{}` ({}) [project key: {key}]",
+            app.name, found.app_id
+        );
+        if !clever.is_dry_run() {
+            state.upsert(StateResource {
+                kind: ResourceKind::App,
+                id: found.app_id.clone(),
+                org_id: project.org.clone(),
+                region: found.zone.clone(),
+                env: env.to_string(),
+                name: app.name.clone(),
+            });
+        }
+        update_app(clever, &found.app_id, app)?;
+        return Ok(found.app_id);
+    }
+
+    // Create.
+    info!("creating app `{}` [project key: {key}]", app.name);
+    let github = app
+        .source
+        .as_ref()
+        .map(|s| parse_github(&s.from))
+        .transpose()?
+        .flatten();
+    let id = clever.create_app(&CreateApp {
+        name: &app.name,
+        kind: &app.kind,
+        org: &project.org,
+        region,
+        github: github.as_deref(),
+    })?;
+    if app.source.is_some() && github.is_none() {
+        warn!(
+            "app `{}` source is not a github URL — app created empty, you'll need to deploy the code manually",
+            app.name
+        );
+    }
+    if !clever.is_dry_run() {
+        state.upsert(StateResource {
+            kind: ResourceKind::App,
+            id: id.clone(),
+            org_id: project.org.clone(),
+            region: region.to_string(),
+            env: env.to_string(),
+            name: app.name.clone(),
+        });
+    }
+    update_app(clever, &id, app)?;
+    Ok(id)
+}
+
+/// Force-refresh state against fresh clever listings: every project resource
+/// known to state is verified to actually exist; stale entries are removed
+/// and replaced by whatever the listing reports under the same `name`. Dep
+/// maps are rebuilt from the corrected state.
+fn refresh_dep_maps(
+    clever: &Clever,
+    state: &mut State,
+    cache: &mut OrgCache,
+    project: &Project,
+    env: &str,
+    app_id_by_key: &mut HashMap<String, String>,
+    addon_id_by_key: &mut HashMap<String, String>,
+) -> Result<()> {
+    cache.invalidate();
+
+    // Materialize the listings up front so we can hold mutable refs to state.
+    let live_apps: HashMap<String, ListedApp> = cache.apps(clever, &project.org)?.clone();
+    let live_addons: HashMap<String, ListedAddon> = cache.addons(clever, &project.org)?.clone();
+
+    for (key, addon) in &project.addons {
+        let prev_id = state
+            .find(ResourceKind::Addon, &addon.name, &project.org)
+            .map(|r| r.id.clone());
+        match live_addons.get(&addon.name) {
+            Some(found) => {
+                if prev_id.as_deref() != Some(&found.addon_id) {
+                    if let Some(id) = &prev_id {
+                        state.remove_by_id(id);
+                    }
+                    state.upsert(StateResource {
+                        kind: ResourceKind::Addon,
+                        id: found.addon_id.clone(),
+                        org_id: project.org.clone(),
+                        region: found.region.clone(),
+                        env: env.to_string(),
+                        name: addon.name.clone(),
+                    });
+                }
+                addon_id_by_key.insert(key.clone(), found.addon_id.clone());
+            }
+            None => {
+                if let Some(id) = prev_id {
+                    state.remove_by_id(&id);
+                }
+                addon_id_by_key.remove(key);
+                warn!(
+                    "addon `{}` referenced by project key `{key}` not found in org `{}` after refresh",
+                    addon.name, project.org
+                );
+            }
+        }
+    }
+
+    for (key, app) in &project.apps {
+        let prev_id = state
+            .find(ResourceKind::App, &app.name, &project.org)
+            .map(|r| r.id.clone());
+        match live_apps.get(&app.name) {
+            Some(found) => {
+                if prev_id.as_deref() != Some(&found.app_id) {
+                    if let Some(id) = &prev_id {
+                        state.remove_by_id(id);
+                    }
+                    state.upsert(StateResource {
+                        kind: ResourceKind::App,
+                        id: found.app_id.clone(),
+                        org_id: project.org.clone(),
+                        region: found.zone.clone(),
+                        env: env.to_string(),
+                        name: app.name.clone(),
+                    });
+                }
+                app_id_by_key.insert(key.clone(), found.app_id.clone());
+            }
+            None => {
+                if let Some(id) = prev_id {
+                    state.remove_by_id(&id);
+                }
+                app_id_by_key.remove(key);
+                warn!(
+                    "app `{}` referenced by project key `{key}` not found in org `{}` after refresh",
+                    app.name, project.org
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -201,8 +447,6 @@ fn parse_github(url: &str) -> Result<Option<String>> {
     } else {
         return Ok(None);
     };
-    // Use the original-case substring of the same length so the returned
-    // `owner/repo` keeps GitHub's casing.
     let offset = s.len() - rest.len();
     let original = &s[offset..];
     let trimmed = original
@@ -291,7 +535,8 @@ fn sync_dependencies(
         }
     }
 
-    let (current_apps, current_addons): (HashSet<String>, HashSet<String>) = if is_synthetic(app_id) {
+    let (current_apps, current_addons): (HashSet<String>, HashSet<String>) = if is_synthetic(app_id)
+    {
         // Freshly created in dry-run: no existing links to read.
         (HashSet::new(), HashSet::new())
     } else {
