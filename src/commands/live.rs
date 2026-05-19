@@ -1,18 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use tracing::{info, warn};
 
 use crate::clever::Clever;
-use crate::model::{Addon, App, NetworkGroup, Source};
+use crate::model::{Addon, App, NetworkGroup, Project, Source};
 
-/// In-memory view of what currently lives in an org. Shape parallels
-/// `model::Project` so callers (e.g. `status`) can diff project-vs-live
-/// without translating between two representations. Fields that aren't
-/// exposed by `clever` in JSON mode are left at their defaults (see the
-/// notes on `read.rs` for the same caveats around `scalability`, addon
-/// `version`, app source branch, etc.).
+/// In-memory view of what currently lives in an org, scoped to the
+/// resources the project file cares about. `apps` / `addons` /
+/// `network_groups` only hold detailed entries for resources whose name
+/// matches one in the project file — we deliberately avoid fetching
+/// env / domains / services for unrelated apps in the same org. The
+/// `live_*_names` sets carry just the names of every resource the org
+/// returns, so callers that need to detect orphans (e.g. `status`) can
+/// still do so cheaply.
 #[derive(Debug, Clone)]
 pub struct LiveSnapshot {
     pub apps: IndexMap<String, App>,
@@ -22,11 +24,18 @@ pub struct LiveSnapshot {
     /// across apps + addons. Used so per-resource regions are only emitted
     /// when they differ from this default — matches the `read` heuristic.
     pub default_region: String,
+    /// Names of every app the org returned (regardless of whether the
+    /// project file mentions them). Cheap — populated from the listing.
+    pub live_app_names: BTreeSet<String>,
+    pub live_addon_names: BTreeSet<String>,
+    pub live_ng_names: BTreeSet<String>,
 }
 
-/// Pull the full live snapshot for an org. Three list calls + per-app env,
-/// domains and services. NGs come from `list_network_groups`.
-pub fn snapshot(clever: &Clever, org: &str) -> Result<LiveSnapshot> {
+/// Snapshot the org, but only fetch detailed env / domains / services for
+/// apps (and detailed plans for addons / NGs) whose name appears in the
+/// project file. The three org-wide list calls stay — they're cheap and
+/// needed to know which project resources already exist.
+pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSnapshot> {
     info!("listing live resources in org `{org}`");
     let all_apps = clever
         .list_apps(org)
@@ -40,6 +49,21 @@ pub fn snapshot(clever: &Clever, org: &str) -> Result<LiveSnapshot> {
 
     let default_region = pick_default_region(&all_apps, &all_addons);
 
+    // Resource names mentioned by the project file. These are the only ones
+    // worth pulling detailed info for — everything else is noise that costs
+    // 3 extra API calls per app.
+    let project_app_names: HashSet<&str> = project.apps.values().map(|a| a.name.as_str()).collect();
+    let project_addon_names: HashSet<&str> =
+        project.addons.values().map(|a| a.name.as_str()).collect();
+    let project_ng_names: HashSet<&str> = project
+        .network_groups
+        .values()
+        .map(|n| n.name.as_str())
+        .collect();
+
+    // Indexes for dependency resolution inside the apps we *do* fetch in
+    // detail. We need ids → names for the full org because a project app
+    // may depend on an addon or app outside the file.
     let app_name_by_id: HashMap<String, String> = all_apps
         .iter()
         .map(|a| (a.app_id.clone(), a.name.clone()))
@@ -48,14 +72,17 @@ pub fn snapshot(clever: &Clever, org: &str) -> Result<LiveSnapshot> {
         .iter()
         .map(|a| (a.addon_id.clone(), a.name.clone()))
         .collect();
-    // NGs link by member id which can be an app id or an addon's real_id.
     let addon_name_by_real_id: HashMap<String, String> = all_addons
         .iter()
         .map(|a| (a.real_id.clone(), a.name.clone()))
         .collect();
 
+    // Detailed apps — only for those in the project file.
     let mut apps: IndexMap<String, App> = IndexMap::new();
     for listed in &all_apps {
+        if !project_app_names.contains(listed.name.as_str()) {
+            continue;
+        }
         let env_vars = clever
             .get_env(&listed.app_id)
             .with_context(|| format!("reading env of app `{}`", listed.name))?;
@@ -116,8 +143,14 @@ pub fn snapshot(clever: &Clever, org: &str) -> Result<LiveSnapshot> {
         );
     }
 
+    // Detailed addons — only those in the project file. The listing is
+    // already detailed enough to fill in `kind` / `size` / `region`, no
+    // extra per-addon call.
     let mut addons: IndexMap<String, Addon> = IndexMap::new();
     for listed in &all_addons {
+        if !project_addon_names.contains(listed.name.as_str()) {
+            continue;
+        }
         addons.insert(
             listed.name.clone(),
             Addon {
@@ -132,8 +165,12 @@ pub fn snapshot(clever: &Clever, org: &str) -> Result<LiveSnapshot> {
         );
     }
 
+    // Detailed NGs — only those in the project file.
     let mut network_groups: IndexMap<String, NetworkGroup> = IndexMap::new();
     for listed in &all_ngs {
+        if !project_ng_names.contains(listed.label.as_str()) {
+            continue;
+        }
         let mut link: Vec<String> = Vec::new();
         for m in &listed.members {
             if let Some(name) = app_name_by_id.get(&m.id) {
@@ -157,11 +194,18 @@ pub fn snapshot(clever: &Clever, org: &str) -> Result<LiveSnapshot> {
         );
     }
 
+    let live_app_names: BTreeSet<String> = all_apps.iter().map(|a| a.name.clone()).collect();
+    let live_addon_names: BTreeSet<String> = all_addons.iter().map(|a| a.name.clone()).collect();
+    let live_ng_names: BTreeSet<String> = all_ngs.iter().map(|n| n.label.clone()).collect();
+
     Ok(LiveSnapshot {
         apps,
         addons,
         network_groups,
         default_region,
+        live_app_names,
+        live_addon_names,
+        live_ng_names,
     })
 }
 
