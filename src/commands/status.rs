@@ -7,6 +7,9 @@ use tracing::info;
 
 use crate::clever::Clever;
 use crate::cli::StatusArgs;
+use crate::commands::diff::{
+    DiffBody, FieldDiff, diff_map, diff_set, kinds_equivalent, quote_escape, sizes_equivalent,
+};
 use crate::commands::live::{LiveSnapshot, snapshot as live_snapshot};
 use crate::commands::resolve_project_file;
 use crate::model::{Addon, App, NetworkGroup, Project};
@@ -68,33 +71,6 @@ struct ResourceVerdict {
     name: String,
     tag: ResourceTag,
     diffs: Vec<FieldDiff>,
-}
-
-#[derive(Debug, Clone)]
-struct FieldDiff {
-    field: String,
-    body: DiffBody,
-}
-
-#[derive(Debug, Clone)]
-enum DiffBody {
-    Scalar { file: String, live: String },
-    Set(Vec<SetEntry>),
-    Map(Vec<MapEntry>),
-}
-
-#[derive(Debug, Clone)]
-struct SetEntry {
-    op: char, // '+', '-'
-    value: String,
-}
-
-#[derive(Debug, Clone)]
-struct MapEntry {
-    op: char, // '+', '-', '~'
-    key: String,
-    file: Option<String>,
-    live: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -355,102 +331,6 @@ fn diff_ng(file: &NetworkGroup, live: &NetworkGroup) -> Vec<FieldDiff> {
     diffs
 }
 
-fn diff_set(field: &str, file: &[String], live: &[String]) -> Option<FieldDiff> {
-    let file_set: BTreeSet<&str> = file.iter().map(String::as_str).collect();
-    let live_set: BTreeSet<&str> = live.iter().map(String::as_str).collect();
-    if file_set == live_set {
-        return None;
-    }
-    let mut entries: Vec<SetEntry> = Vec::new();
-    for v in file_set.difference(&live_set) {
-        entries.push(SetEntry {
-            op: '+',
-            value: (*v).to_string(),
-        });
-    }
-    for v in live_set.difference(&file_set) {
-        entries.push(SetEntry {
-            op: '-',
-            value: (*v).to_string(),
-        });
-    }
-    Some(FieldDiff {
-        field: field.into(),
-        body: DiffBody::Set(entries),
-    })
-}
-
-fn diff_map(
-    field: &str,
-    file: &IndexMap<String, String>,
-    live: &IndexMap<String, String>,
-) -> Option<FieldDiff> {
-    let mut entries: Vec<MapEntry> = Vec::new();
-    let mut keys: BTreeSet<&str> = file.keys().map(String::as_str).collect();
-    keys.extend(live.keys().map(String::as_str));
-    for k in keys {
-        match (file.get(k), live.get(k)) {
-            (Some(fv), Some(lv)) if fv == lv => {}
-            (Some(fv), Some(lv)) => entries.push(MapEntry {
-                op: '~',
-                key: k.into(),
-                file: Some(fv.clone()),
-                live: Some(lv.clone()),
-            }),
-            (Some(fv), None) => entries.push(MapEntry {
-                op: '+',
-                key: k.into(),
-                file: Some(fv.clone()),
-                live: None,
-            }),
-            (None, Some(lv)) => entries.push(MapEntry {
-                op: '-',
-                key: k.into(),
-                file: None,
-                live: Some(lv.clone()),
-            }),
-            (None, None) => {}
-        }
-    }
-    if entries.is_empty() {
-        return None;
-    }
-    Some(FieldDiff {
-        field: field.into(),
-        body: DiffBody::Map(entries),
-    })
-}
-
-/// Loose equivalence between the project file's addon `kind` and the live
-/// provider id (stripped of the `-addon` suffix on the live side). Mirrors
-/// the aliases recognized at apply time so `postgresql` doesn't read as
-/// drifted vs a live `postgresql` (which was `postgresql-addon` upstream).
-fn kinds_equivalent(file: &str, live: &str) -> bool {
-    if file == live {
-        return true;
-    }
-    let canon = |s: &str| -> String {
-        match s.to_lowercase().as_str() {
-            "postgres" | "pg" | "postgresql-addon" => "postgresql".into(),
-            "mongo" | "mongodb-addon" => "mongodb".into(),
-            "es" | "es-addon" => "elasticsearch".into(),
-            "s3" | "cellar-addon" => "cellar".into(),
-            "mysql-addon" => "mysql".into(),
-            "redis-addon" => "redis".into(),
-            "addon-matomo" => "matomo".into(),
-            "addon-pulsar" => "pulsar".into(),
-            other => other.to_string(),
-        }
-    };
-    canon(file) == canon(live)
-}
-
-/// Treat `S_BIG` and `s_big` as the same plan; matches the case-normalization
-/// done in `apply::validate_addons` so users don't see a spurious size drift.
-fn sizes_equivalent(file: &str, live: &str) -> bool {
-    file.to_lowercase() == live.to_lowercase()
-}
-
 fn render(project: &Project, report: &Report, brief: bool) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -591,10 +471,6 @@ fn render_field_diff(out: &mut String, diff: &FieldDiff) {
             }
         }
     }
-}
-
-fn quote_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
