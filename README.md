@@ -35,7 +35,7 @@ cargo build --release
 ```yaml
 # project.yaml
 name: my-project
-org: orga_004eedf6-2624-4030-b549-9d4895934f13
+org: orga_xxxxxx-xxxx-xxxxx
 region: par
 variables:
   domain: example.com
@@ -304,16 +304,16 @@ After every successful `apply` or `delete`, the CLI writes a sidecar `<project>.
 [
   {
     "kind": "app",
-    "id": "app_e9ba25b2-0168-46df-849c-fedf016f3c28",
-    "org_id": "orga_004eedf6-2624-4030-b549-9d4895934f13",
+    "id": "app_xxxxxxx-xxxxx-xxxxxx",
+    "org_id": "orga_xxxxxx-xxxx-xxxxx",
     "region": "par",
     "env": "prod",
     "name": "prod-api"
   },
   {
     "kind": "addon",
-    "id": "addon_84758ebf-db0d-40b5-8857-be5b7dce51e6",
-    "org_id": "orga_004eedf6-2624-4030-b549-9d4895934f13",
+    "id": "addon_xxxxxx-xxxxxx-xxxxxx",
+    "org_id": "orga_xxxxxx-xxxx-xxxxx",
     "region": "par",
     "env": "prod",
     "name": "prod-api-db"
