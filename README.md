@@ -30,7 +30,7 @@ Pick one:
 Each tagged release publishes archives for Linux (x86_64 / aarch64, gnu + musl), macOS (x86_64 / aarch64) and Windows (x86_64 / aarch64) on the GitHub Releases page:
 
 ```
-https://github.com/<owner>/clever-project/releases/latest
+https://github.com/mathieuancelin/clever-project/releases/latest
 ```
 
 Download the archive matching your platform, extract, and put `clever-project` somewhere on your `PATH`.
@@ -44,7 +44,7 @@ cargo install clever-project
 ### From source
 
 ```sh
-git clone https://github.com/<owner>/clever-project.git
+git clone https://github.com/mathieuancelin/clever-project.git
 cd clever-project
 cargo install --path .
 # or just:
