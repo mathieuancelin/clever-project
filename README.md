@@ -27,7 +27,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ Provider-name mapping for addon creation (`postgresql` → `postgresql-addon`, `cellar` → `cellar-addon`, `matomo` → `addon-matomo`, etc. — pass-through for anything unknown)
 - ✅ `--env <value>` shortcut on `apply` and `delete` to set the special `${env}` variable
 - ✅ `--dry-run` flag on `apply` and `delete`: reads current state but logs `[dry-run]` mutations instead of executing them
-- ✅ 32 unit tests green, build with no warnings
+- ✅ 34 unit tests green, build with no warnings
 
 ### Decisions
 
@@ -171,13 +171,23 @@ If neither file exists and no `--secrets-path` is given, the secrets map is simp
 
 ### File format
 
-A flat `Map<String, scalar>` in YAML:
+A flat `Map<String, scalar>`. The content can be **YAML or JSON** — both parsers are tried and the first one that succeeds wins. The file name is the same either way (`<stem>.secrets` / `<stem>.<env>.secrets`).
 
 ```yaml
-# myproj.secrets
+# myproj.secrets  (YAML)
 apikey: shared-secret
 db_password: hunter2
 ```
+
+```json
+// myproj.secrets  (JSON — same name, same lookup)
+{
+  "apikey": "shared-secret",
+  "db_password": "hunter2"
+}
+```
+
+If a file is neither valid YAML nor valid JSON, both parser errors are surfaced so you can see what went wrong.
 
 ### Use anywhere — including inside `variables:`
 
