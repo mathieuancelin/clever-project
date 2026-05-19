@@ -12,6 +12,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ Cargo skeleton + dependencies (`clap`, `serde`, `serde_yaml`, `serde_json`, `anyhow`, `tracing`, `which`, `indexmap`, `regex`)
 - ✅ Data model + YAML/JSON loading (format detected by file extension)
 - ✅ `${var}` interpolation (file `variables:` section, `--variable foo=bar` CLI overrides take precedence, special variables `${env}`/`${org}`/`${region}`, reserved-name rejection, hard error on missing variable)
+- ✅ Per-env variables: the `variables:` section accepts either a flat `key: value` map (default) or a `group → key: value` map keyed by `${env}` with a special `common` group always merged in
 - ✅ `clever-tools` wrapper (read + write):
     - read: `list_apps`, `list_addons`, `get_env`, `get_domains`, `get_services`
     - write: `create_app`, `delete_app`, `create_addon`, `delete_addon`, `env_replace`, `domain_add`, `domain_rm`, `scale`, `link_addon`/`unlink_addon`, `link_app`/`unlink_app`
@@ -24,7 +25,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ Provider-name mapping for addon creation (`postgresql` → `postgresql-addon`, `cellar` → `cellar-addon`, `matomo` → `addon-matomo`, etc. — pass-through for anything unknown)
 - ✅ `--env <value>` shortcut on `apply` and `delete` to set the special `${env}` variable
 - ✅ `--dry-run` flag on `apply` and `delete`: reads current state but logs `[dry-run]` mutations instead of executing them
-- ✅ 19 unit tests green, build with no warnings
+- ✅ 23 unit tests green, build with no warnings
 
 ### Decisions
 
@@ -83,6 +84,51 @@ Verbose mode:
 ```sh
 clever-project --verbose apply project.yaml
 ```
+
+## Variables
+
+The `variables:` section of a project file supports two shapes — pick the one that fits.
+
+### Flat form
+
+A simple `key: value` map. Every variable is always available regardless of `${env}`.
+
+```yaml
+variables:
+  domain: foo.bar
+  apikey: shared-secret
+```
+
+### Per-env form
+
+A `group → key: value` map. The group named `common` is always merged in, then the group whose name matches the resolved value of `${env}` is merged on top (env-specific entries override `common`).
+
+```yaml
+variables:
+  common:
+    domain: foo.bar     # available in every env
+  prod:
+    apikey: secret_for_prod
+  dev:
+    apikey: secret_for_dev
+    domain: dev.bar     # overrides common for ${env}=dev
+```
+
+The active env is picked, in priority order:
+1. `--env <value>` on the command line
+2. `--variable env=<value>`
+3. default `prod`
+
+So with the example above:
+- `clever-project apply project.yaml` (env defaults to `prod`) → `domain=foo.bar`, `apikey=secret_for_prod`
+- `clever-project apply project.yaml --env dev` → `domain=dev.bar`, `apikey=secret_for_dev`
+- `clever-project apply project.yaml --env staging` → only `common` applies; any reference to `${apikey}` errors out
+
+### Rules
+- The two shapes can't be mixed — every top-level value must be either all scalars (flat) or all mappings (per-env).
+- The reserved names `env`, `org`, `region` cannot be redefined in `variables:` (any form).
+- `--variable foo=bar` on the CLI overrides any value from the file, regardless of the form.
+- If `${env}` doesn't match any per-env group, only `common` is available — references to env-specific variables will fail loudly.
 
 ## Code layout
 
