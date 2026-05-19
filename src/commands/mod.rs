@@ -1,8 +1,10 @@
 pub mod apply;
 pub mod check;
 pub mod delete;
+pub mod diff;
 pub mod init;
 pub mod live;
+pub mod plan;
 pub mod read;
 pub mod status;
 
