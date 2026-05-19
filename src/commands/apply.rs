@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, anyhow, bail};
 use tracing::{info, warn};
 
-use crate::cli::ApplyArgs;
 use crate::clever::{Clever, CreateAddon, CreateApp, ListedAddon, ListedApp};
+use crate::cli::ApplyArgs;
 use crate::commands::OrgCache;
 use crate::model::{App, Project, Source};
 use crate::state::{ResourceKind, State, StateResource};
@@ -85,29 +85,28 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     // we can decide on restarts in phase 4. Wrapped in a one-shot retry: if
     // anything fails (likely due to a stale id pulled from state), refresh
     // state against fresh listings, rebuild the dep maps, and try again.
-    let run_phase3 =
-        |clever: &Clever,
-         apps_to_link: &[(String, &App)],
-         app_id_by_key: &HashMap<String, String>,
-         addon_id_by_key: &HashMap<String, String>,
-         project: &Project|
-         -> Result<HashMap<String, bool>> {
-            let mut changed = HashMap::new();
-            for (key, app) in apps_to_link {
-                let app_id = &app_id_by_key[key];
-                let deps_changed = sync_dependencies(
-                    clever,
-                    app_id,
-                    &app.dependencies,
-                    app_id_by_key,
-                    addon_id_by_key,
-                    project,
-                )
-                .with_context(|| format!("syncing dependencies of app `{}`", app.name))?;
-                changed.insert(key.clone(), deps_changed);
-            }
-            Ok(changed)
-        };
+    let run_phase3 = |clever: &Clever,
+                      apps_to_link: &[(String, &App)],
+                      app_id_by_key: &HashMap<String, String>,
+                      addon_id_by_key: &HashMap<String, String>,
+                      project: &Project|
+     -> Result<HashMap<String, bool>> {
+        let mut changed = HashMap::new();
+        for (key, app) in apps_to_link {
+            let app_id = &app_id_by_key[key];
+            let deps_changed = sync_dependencies(
+                clever,
+                app_id,
+                &app.dependencies,
+                app_id_by_key,
+                addon_id_by_key,
+                project,
+            )
+            .with_context(|| format!("syncing dependencies of app `{}`", app.name))?;
+            changed.insert(key.clone(), deps_changed);
+        }
+        Ok(changed)
+    };
 
     let deps_changed_by_key: HashMap<String, bool> = match run_phase3(
         &clever,
@@ -656,7 +655,10 @@ fn sync_dependencies(
             continue;
         }
         if let Some(app) = project.apps.values().find(|a| a.name == *dep_key) {
-            warn!("dependency `{dep_key}` matched by name on app `{}`", app.name);
+            warn!(
+                "dependency `{dep_key}` matched by name on app `{}`",
+                app.name
+            );
         }
     }
 
