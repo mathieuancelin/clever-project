@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use crate::clever::Clever;
 use crate::cli::DeleteArgs;
 use crate::commands::prompt;
+use crate::commands::targets::{self as targets_mod, TargetKind, Targets};
 use crate::commands::{OrgCache, resolve_project_file};
 use crate::model::Project;
 use crate::state::{ResourceKind, State};
@@ -43,16 +44,19 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         info!("[dry-run] no mutations will be sent to Clever Cloud");
     }
 
-    print!("{}", render_delete_plan(&project));
+    let targets = targets_mod::build(&args.targets, &project)
+        .with_context(|| "validating --target flags".to_string())?;
 
-    let total = project.network_groups.len() + project.apps.len() + project.addons.len();
+    print!("{}", render_delete_plan(&project, &targets));
+
+    let total = count_targets(&project, &targets);
 
     if args.dry_run {
         info!("dry-run: {total} resource(s) would be deleted");
         return Ok(());
     }
     if total == 0 {
-        info!("nothing to delete — project file has no resources");
+        info!("nothing to delete — project file has no resources matching the current targets");
         return Ok(());
     }
     if !args.yes {
@@ -77,6 +81,9 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     let mut failures = 0usize;
 
     for (key, ng) in &project.network_groups {
+        if !targets.is_targeted(TargetKind::NetworkGroup, key) {
+            continue;
+        }
         if let Err(e) = delete_resource(
             &clever,
             &mut state,
@@ -95,6 +102,9 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     }
 
     for (key, app) in &project.apps {
+        if !targets.is_targeted(TargetKind::App, key) {
+            continue;
+        }
         if let Err(e) = delete_resource(
             &clever,
             &mut state,
@@ -110,6 +120,9 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     }
 
     for (key, addon) in &project.addons {
+        if !targets.is_targeted(TargetKind::Addon, key) {
+            continue;
+        }
         if let Err(e) = delete_resource(
             &clever,
             &mut state,
@@ -221,38 +234,84 @@ fn call_delete(clever: &Clever, kind: ResourceKind, id: &str, org: &str) -> Resu
     }
 }
 
+fn count_targets(project: &Project, targets: &Targets) -> usize {
+    let ngs = project
+        .network_groups
+        .keys()
+        .filter(|k| targets.is_targeted(TargetKind::NetworkGroup, k))
+        .count();
+    let apps = project
+        .apps
+        .keys()
+        .filter(|k| targets.is_targeted(TargetKind::App, k))
+        .count();
+    let addons = project
+        .addons
+        .keys()
+        .filter(|k| targets.is_targeted(TargetKind::Addon, k))
+        .count();
+    ngs + apps + addons
+}
+
 /// Render the list of resources delete will attempt to remove, in the order
 /// it will attempt them (NGs first to release members, then apps, then
 /// addons). No live API call is made here — delete is best-effort and will
 /// skip anything that's already gone with a warning at run time.
-fn render_delete_plan(project: &Project) -> String {
+fn render_delete_plan(project: &Project, targets: &Targets) -> String {
     let mut out = String::new();
-    let total = project.network_groups.len() + project.apps.len() + project.addons.len();
     let _ = writeln!(
         out,
         "Plan for project `{}` against org `{}`:",
         project.name, project.org
     );
+    if !targets.is_empty() {
+        let _ = writeln!(out, "  {}", targets.label());
+    }
+
+    let ng_keys: Vec<&String> = project
+        .network_groups
+        .keys()
+        .filter(|k| targets.is_targeted(TargetKind::NetworkGroup, k))
+        .collect();
+    let app_keys: Vec<&String> = project
+        .apps
+        .keys()
+        .filter(|k| targets.is_targeted(TargetKind::App, k))
+        .collect();
+    let addon_keys: Vec<&String> = project
+        .addons
+        .keys()
+        .filter(|k| targets.is_targeted(TargetKind::Addon, k))
+        .collect();
+    let total = ng_keys.len() + app_keys.len() + addon_keys.len();
+
     if total == 0 {
-        let _ = writeln!(out, "  (project file has no resources to delete)");
+        let _ = writeln!(
+            out,
+            "  (nothing to delete — project file or current targets match no resources)"
+        );
         return out;
     }
     let _ = writeln!(
         out,
         "  {total} to destroy: {} network_group, {} app, {} addon.",
-        project.network_groups.len(),
-        project.apps.len(),
-        project.addons.len()
+        ng_keys.len(),
+        app_keys.len(),
+        addon_keys.len()
     );
     let _ = writeln!(out);
-    for ng in project.network_groups.values() {
-        let _ = writeln!(out, "  - network_group \"{}\"", ng.name);
+    for k in &ng_keys {
+        let _ = writeln!(
+            out,
+            "  - network_group \"{}\"",
+            project.network_groups[*k].name
+        );
     }
-    for app in project.apps.values() {
-        let _ = writeln!(out, "  - app \"{}\"", app.name);
+    for k in &app_keys {
+        let _ = writeln!(out, "  - app \"{}\"", project.apps[*k].name);
     }
-    for addon in project.addons.values() {
-        let _ = writeln!(out, "  - addon \"{}\"", addon.name);
+    for k in &addon_keys {
+        let _ = writeln!(out, "  - addon \"{}\"", project.addons[*k].name);
     }
     out
 }
@@ -313,8 +372,8 @@ mod tests {
     #[test]
     fn empty_project_renders_friendly_message() {
         let project = make_project();
-        let s = render_delete_plan(&project);
-        assert!(s.contains("no resources to delete"));
+        let s = render_delete_plan(&project, &Targets::default());
+        assert!(s.contains("nothing to delete"));
     }
 
     #[test]
@@ -323,7 +382,7 @@ mod tests {
         project.apps.insert("a".into(), make_app("prod-api"));
         project.addons.insert("d".into(), make_addon("prod-db"));
         project.network_groups.insert("n".into(), make_ng("vpn"));
-        let s = render_delete_plan(&project);
+        let s = render_delete_plan(&project, &Targets::default());
         // NGs first, apps next, addons last.
         let ng_pos = s.find("vpn").unwrap();
         let app_pos = s.find("prod-api").unwrap();
@@ -339,7 +398,47 @@ mod tests {
         project.apps.insert("a".into(), make_app("x"));
         project.apps.insert("b".into(), make_app("y"));
         project.addons.insert("d".into(), make_addon("z"));
-        let s = render_delete_plan(&project);
+        let s = render_delete_plan(&project, &Targets::default());
         assert!(s.contains("3 to destroy: 0 network_group, 2 app, 1 addon"));
+    }
+
+    #[test]
+    fn targets_filter_delete_plan() {
+        let mut project = make_project();
+        project.apps.insert("a".into(), make_app("prod-api"));
+        project.apps.insert("b".into(), make_app("prod-worker"));
+        project.addons.insert("d".into(), make_addon("prod-db"));
+        let mut targets = Targets::default();
+        targets.apps.insert("a".into());
+
+        let s = render_delete_plan(&project, &targets);
+        assert!(s.contains("1 to destroy: 0 network_group, 1 app, 0 addon"));
+        assert!(s.contains("prod-api"));
+        assert!(!s.contains("prod-worker"));
+        assert!(!s.contains("prod-db"));
+        assert!(s.contains("(targeting: apps.a)"));
+    }
+
+    #[test]
+    fn targets_with_no_matches_renders_empty_message() {
+        // Edge: project has addons but only an app target → nothing matches.
+        let mut project = make_project();
+        project.addons.insert("d".into(), make_addon("prod-db"));
+        let mut targets = Targets::default();
+        targets.apps.insert("nonexistent".into());
+        let s = render_delete_plan(&project, &targets);
+        assert!(s.contains("nothing to delete"));
+    }
+
+    #[test]
+    fn count_targets_respects_filter() {
+        let mut project = make_project();
+        project.apps.insert("a".into(), make_app("x"));
+        project.apps.insert("b".into(), make_app("y"));
+        project.addons.insert("d".into(), make_addon("z"));
+        assert_eq!(count_targets(&project, &Targets::default()), 3);
+        let mut targets = Targets::default();
+        targets.addons.insert("d".into());
+        assert_eq!(count_targets(&project, &targets), 1);
     }
 }
