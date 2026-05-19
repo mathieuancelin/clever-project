@@ -8,8 +8,10 @@ use serde_yaml::Value;
 
 pub const RESERVED: &[&str] = &["env", "org", "region"];
 
-static VAR_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").unwrap());
+static VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Identifiers, optionally dot-namespaced (`secrets.apikey`, `foo.bar.baz`).
+    Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}").unwrap()
+});
 
 /// Resolves `${name}` occurrences against a flat variable map.
 ///
