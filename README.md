@@ -84,27 +84,40 @@ addons:
 ```
 
 ```sh
+# Save the file as `project.clever.yaml` and `clever-project` finds it
+# automatically — no path argument needed.
+
 # Create everything for env=prod
-clever-project apply project.yaml --env prod
+clever-project apply --env prod
 
 # Same project, different env — every ${env} reference flips
-clever-project apply project.yaml --env staging
+clever-project apply --env staging
 
 # Preview without changing anything
-clever-project apply project.yaml --env prod --dry-run
+clever-project apply --env prod --dry-run
 
 # Tear it all down for one env
-clever-project delete project.yaml --env staging
+clever-project delete --env staging
 ```
 
 ## Commands
+
+### Project file lookup
+
+`apply`, `delete` and `check` take the project file as a positional argument. If you omit it, the CLI looks for one of these (in order) in the current working directory:
+
+1. `project.clever.yaml`
+2. `project.clever.yml`
+3. `project.clever.json`
+
+If none exists, the run aborts with a clear error pointing you at the missing descriptor. Naming your file `project.clever.yaml` and running `clever-project apply --env prod` (no path) is the recommended workflow.
 
 ### `apply`
 
 Create or update the resources described by the project file. The project file is the source of truth: existing apps have their `env`, `domains`, `scalability` and service links replaced to match. Addons that already exist are left untouched (only their existence is reconciled).
 
 ```
-clever-project apply <FILE> [OPTIONS]
+clever-project apply [FILE] [OPTIONS]
 ```
 
 Options:
@@ -137,7 +150,7 @@ Newly created apps *without* a GitHub source are not restarted (no code to deplo
 Delete the resources listed in the project file. Network groups are removed first (releasing members), then apps before addons (so service links are released first). Anything that's already gone is skipped with a warning — `delete` is best-effort.
 
 ```
-clever-project delete <FILE> [OPTIONS]
+clever-project delete [FILE] [OPTIONS]
 ```
 
 Same flags as `apply` (minus `--region`).
@@ -147,7 +160,7 @@ Same flags as `apply` (minus `--region`).
 Validate a project file without contacting Clever Cloud for any mutation. Useful in pre-commit hooks and CI.
 
 ```
-clever-project check <FILE> [OPTIONS]
+clever-project check [FILE] [OPTIONS]
 ```
 
 Runs, in order:
