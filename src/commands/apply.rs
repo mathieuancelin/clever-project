@@ -11,6 +11,7 @@ use crate::cli::ApplyArgs;
 use crate::commands::live::snapshot as live_snapshot;
 use crate::commands::plan as plan_mod;
 use crate::commands::prompt;
+use crate::commands::targets::{self as targets_mod, TargetKind, Targets};
 use crate::commands::{OrgCache, resolve_project_file};
 use crate::issues::{self, Issue, IssueSink};
 use crate::model::{Addon, App, NetworkGroup, Project, Source};
@@ -84,14 +85,19 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         bail!("{}", issues::render(&live_issues));
     }
 
+    // Resolve and validate targets against the project file. Typos here
+    // bail before we contact the org.
+    let targets = targets_mod::build(&args.targets, &project)
+        .with_context(|| "validating --target flags".to_string())?;
+
     // Structured plan output: snapshot the live org, compute a per-resource
     // diff against the project file, and print the result. Always printed,
     // so the user (and `--dry-run`) see exactly what apply will do before
     // it touches anything.
     let live = live_snapshot(&clever, &project.org)
         .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
-    let plan = plan_mod::compute(&project, &live);
-    print!("{}", plan_mod::render(&plan, &project));
+    let plan = plan_mod::compute(&project, &live, &targets);
+    print!("{}", plan_mod::render(&plan, &project, &targets));
 
     if args.dry_run {
         info!(
@@ -135,39 +141,70 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     let mut cache = OrgCache::new();
 
     // Phase 1 — addons.
+    //
+    // Targeted addons go through `handle_addon` (create or update). Every
+    // other project addon only has its id resolved (state-first, listing
+    // fallback) so that phase 3's dependency wiring still has the full id
+    // map. A non-targeted addon that doesn't exist anywhere bails out here
+    // with a hint to also `--target` it.
     let mut addon_id_by_key: HashMap<String, String> = HashMap::new();
     for (key, addon) in &project.addons {
-        let id = handle_addon(
-            &clever,
-            &mut state,
-            &mut cache,
-            &project,
-            &effective_env,
-            key,
-            addon,
-        )?;
-        addon_id_by_key.insert(key.clone(), id);
+        if targets.is_targeted(TargetKind::Addon, key) {
+            let id = handle_addon(
+                &clever,
+                &mut state,
+                &mut cache,
+                &project,
+                &effective_env,
+                key,
+                addon,
+            )?;
+            addon_id_by_key.insert(key.clone(), id);
+        } else if let Some(id) =
+            lookup_addon_id(&clever, &state, &mut cache, &project.org, &addon.name)?
+        {
+            addon_id_by_key.insert(key.clone(), id);
+        }
     }
 
-    // Phase 2 — apps.
+    // Phase 2 — apps. Same targeted/lookup-only split as phase 1, but only
+    // targeted apps get queued for phase 3/5 work.
     let mut app_id_by_key: HashMap<String, String> = HashMap::new();
     let mut apps_to_link: Vec<(String, &App)> = Vec::new();
     let mut outcomes: HashMap<String, AppOutcome> = HashMap::new();
 
     for (key, app) in &project.apps {
-        let outcome = handle_app(
-            &clever,
-            &mut state,
-            &mut cache,
-            &project,
-            &effective_env,
-            key,
-            app,
-        )?;
-        app_id_by_key.insert(key.clone(), outcome.id.clone());
-        outcomes.insert(key.clone(), outcome);
-        apps_to_link.push((key.clone(), app));
+        if targets.is_targeted(TargetKind::App, key) {
+            let outcome = handle_app(
+                &clever,
+                &mut state,
+                &mut cache,
+                &project,
+                &effective_env,
+                key,
+                app,
+            )?;
+            app_id_by_key.insert(key.clone(), outcome.id.clone());
+            outcomes.insert(key.clone(), outcome);
+            apps_to_link.push((key.clone(), app));
+        } else if let Some(id) =
+            lookup_app_id(&clever, &state, &mut cache, &project.org, &app.name)?
+        {
+            app_id_by_key.insert(key.clone(), id);
+        }
     }
+
+    // With targeting active, make sure every dependency of every targeted
+    // app is either targeted itself or already resolvable. Caught here
+    // because phase 3 would only surface it as a less helpful "dependency
+    // references neither app nor addon".
+    targets_mod::check_targeted_dep_closure(&project, &targets, |dep_key| {
+        if app_id_by_key.contains_key(dep_key) || addon_id_by_key.contains_key(dep_key) {
+            Some(())
+        } else {
+            None
+        }
+    })?;
 
     // Phase 3 — service links. Per-app `sync_dependencies` returns whether
     // it changed anything; we feed that back into the per-app outcomes so
@@ -282,6 +319,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
             &effective_env,
             &app_id_by_key,
             &addon_real_id_by_key,
+            &targets,
         )?;
     }
 
@@ -322,6 +360,38 @@ pub fn run(args: ApplyArgs) -> Result<()> {
 
     info!("apply complete");
     Ok(())
+}
+
+/// Resolve a non-targeted addon to its live id without mutating anything.
+/// State first (cheap, no network), listing fallback (one org-wide call,
+/// cached). Returns `None` if the addon doesn't exist anywhere — phase 1's
+/// caller then bails with a `--target`-it message.
+fn lookup_addon_id(
+    clever: &Clever,
+    state: &State,
+    cache: &mut OrgCache,
+    org: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    if let Some(r) = state.find(ResourceKind::Addon, name, org) {
+        return Ok(Some(r.id.clone()));
+    }
+    let listed = cache.addons(clever, org)?;
+    Ok(listed.get(name).map(|a| a.addon_id.clone()))
+}
+
+fn lookup_app_id(
+    clever: &Clever,
+    state: &State,
+    cache: &mut OrgCache,
+    org: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    if let Some(r) = state.find(ResourceKind::App, name, org) {
+        return Ok(Some(r.id.clone()));
+    }
+    let listed = cache.apps(clever, org)?;
+    Ok(listed.get(name).map(|a| a.app_id.clone()))
 }
 
 fn handle_addon(
@@ -1011,12 +1081,16 @@ fn sync_network_groups(
     env: &str,
     app_id_by_key: &HashMap<String, String>,
     addon_real_id_by_key: &HashMap<String, String>,
+    targets: &Targets,
 ) -> Result<()> {
     // Fetch the org-wide NG list once for existence checks and member diffs.
     // (No analogue to OrgCache here — NGs are a separate listing.)
     let mut listed: Option<HashMap<String, ListedNetworkGroup>> = None;
 
     for (key, ng) in &project.network_groups {
+        if !targets.is_targeted(TargetKind::NetworkGroup, key) {
+            continue;
+        }
         let desired_members = resolve_ng_members(ng, app_id_by_key, addon_real_id_by_key, key)?;
 
         // Resolve to (ng_id, current_member_ids).
