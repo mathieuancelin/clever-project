@@ -122,6 +122,8 @@ Options:
 
 Apps with a GitHub `source.from` are created with `clever create --github owner/repo`. Non-GitHub sources create an empty app — push your code to the Clever remote yourself afterwards.
 
+**Phases.** `apply` runs in this order: (1) addons, (2) apps create/update, (3) service links between apps and addons, (4) network groups (create + member sync), (5) restarts. Each phase only mutates Clever when the diff requires it.
+
 **Restarts.** At the end of an `apply`, the CLI calls `clever restart --app <id> --quiet` for each app that needs it:
 
 - newly created from a GitHub source (kicks off the first deployment),
@@ -132,7 +134,7 @@ Newly created apps *without* a GitHub source are not restarted (no code to deplo
 
 ### `delete`
 
-Delete the resources listed in the project file. Apps are removed before addons so service links are released first. Anything that's already gone is skipped with a warning — `delete` is best-effort.
+Delete the resources listed in the project file. Network groups are removed first (releasing members), then apps before addons (so service links are released first). Anything that's already gone is skipped with a warning — `delete` is best-effort.
 
 ```
 clever-project delete <FILE> [OPTIONS]
@@ -155,15 +157,16 @@ Runs, in order:
 3. **App `kind`** — must be one of the supported types (case-insensitive, `java` alias accepted).
 4. **Region** — root, per-app, per-addon, plus `--region` override.
 5. **Dependencies** — every `dependencies:` entry must be a project key under `apps:` or `addons:`; self-dependencies are rejected.
-6. **Name uniqueness** — two apps (or two addons) can't resolve to the same `name`. App-vs-addon name collisions are allowed.
-7. **Addon catalog (live API)** — addon `kind`, `size`, and per-addon `region` are checked against the live `clever curl /v2/products/addonproviders`.
-8. **App flavor catalog (live API)** — `scalability.instances.minSize` / `maxSize` are checked against `clever curl /v2/products/instances`.
+6. **Network group links** — every `link:` entry in `network_groups:` must be a project key under `apps:` or `addons:`.
+7. **Name uniqueness** — two apps (or two addons, or two network groups) can't resolve to the same `name`. Cross-type collisions (app vs addon vs NG) are allowed.
+8. **Addon catalog (live API)** — addon `kind`, `size`, and per-addon `region` are checked against the live `clever curl /v2/products/addonproviders`.
+9. **App flavor catalog (live API)** — `scalability.instances.minSize` / `maxSize` are checked against `clever curl /v2/products/instances`.
 
 Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variable-path`, `--secrets-path`). Plus:
 
 | Flag | Description |
 |---|---|
-| `--offline` | Skip steps 7 and 8 (live API). Static validation still runs. Useful when no `clever login` is available. |
+| `--offline` | Skip steps 8 and 9 (live API). Static validation still runs. Useful when no `clever login` is available. |
 
 Exit code: 0 on success, non-zero on first detected issue.
 
@@ -220,9 +223,17 @@ addons:
     crypted: true                      # encryption-at-rest (best-effort, may not apply to every provider)
     region: par
     version: "16"
+network_groups:
+  <key>:
+    name: <clever ng label>            # the Network Group label on Clever
+    description: <optional>            # free-form text
+    link:                              # project keys (apps and/or addons) to attach
+      - api
+      - db
 ```
 
 - Resource references inside `dependencies:` use the **project keys** (`db`, `api`, etc.), not Clever names or ids.
+- Network group `link:` entries are project keys too. Apps are attached via their `app_xxx` id, addons via the underlying provider id (`postgresql_xxx`, `redis_xxx`, ...) which `clever-project` tracks automatically in the state file.
 - App `kind:` must be one of: `docker`, `dotnet`, `elixir`, `frankenphp`, `go`, `gradle`, `haskell`, `jar`, `linux`, `maven`, `meteor`, `node`, `php`, `play1`, `play2`, `python`, `ruby`, `rust`, `sbt`, `static`, `static-apache`, `v`, `war`. Values are matched case-insensitively, and `java` is accepted as an alias for `jar`. Anything else is rejected at load time with the full list.
 - `region:` (root, per-app or per-addon) must be one of: `par`, `parhds`, `scw`, `grahds`, `ldn`, `mtl`, `rbx`, `rbxhds`, `sgp`, `syd`, `wsw`. Unknown regions are rejected at load time (this also applies to `--region` overrides).
 - Addon `kind:` accepts the short form (`postgresql`, `redis`, `cellar`, `matomo`, ...) and is mapped to the right Clever provider id (`postgresql-addon`, `redis-addon`, `cellar-addon`, `addon-matomo`, ...). Unknown values pass through unchanged.
