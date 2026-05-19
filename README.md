@@ -13,6 +13,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ Data model + YAML/JSON loading (format detected by file extension)
 - ✅ `${var}` interpolation (file `variables:` section, `--variable foo=bar` CLI overrides take precedence, special variables `${env}`/`${org}`/`${region}`, reserved-name rejection, hard error on missing variable)
 - ✅ Per-env variables: the `variables:` section accepts either a flat `key: value` map (default) or a `group → key: value` map keyed by `${env}` with a special `common` group always merged in
+- ✅ Secrets: `${secrets.foo}` references resolved from a `<project>.secrets` (or `<project>.<env>.secrets`) sidecar file or from `--secrets-path FILE`. Usable inside the `variables:` section too.
 - ✅ `clever-tools` wrapper (read + write):
     - read: `list_apps`, `list_addons`, `get_env`, `get_domains`, `get_services`
     - write: `create_app`, `delete_app`, `create_addon`, `delete_addon`, `env_replace`, `domain_add`, `domain_rm`, `scale`, `link_addon`/`unlink_addon`, `link_app`/`unlink_app`
@@ -25,7 +26,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ Provider-name mapping for addon creation (`postgresql` → `postgresql-addon`, `cellar` → `cellar-addon`, `matomo` → `addon-matomo`, etc. — pass-through for anything unknown)
 - ✅ `--env <value>` shortcut on `apply` and `delete` to set the special `${env}` variable
 - ✅ `--dry-run` flag on `apply` and `delete`: reads current state but logs `[dry-run]` mutations instead of executing them
-- ✅ 23 unit tests green, build with no warnings
+- ✅ 28 unit tests green, build with no warnings
 
 ### Decisions
 
@@ -62,10 +63,10 @@ clever-project read --org orga_xxx --app frontend --addon main-db -o project.yam
 clever-project read --org orga_xxx --all -o project.yaml
 
 # Apply a project file
-clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--variable foo=bar] [--dry-run]
+clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--variable foo=bar] [--secrets-path FILE] [--dry-run]
 
 # Delete the resources listed in a project file
-clever-project delete project.yaml [--org ...] [--env staging] [--dry-run]
+clever-project delete project.yaml [--org ...] [--env staging] [--secrets-path FILE] [--dry-run]
 
 # real world example app creation
 clever-project apply ./test_project.yaml --org orga_xxxxxxx --env dev
@@ -129,6 +130,54 @@ So with the example above:
 - The reserved names `env`, `org`, `region` cannot be redefined in `variables:` (any form).
 - `--variable foo=bar` on the CLI overrides any value from the file, regardless of the form.
 - If `${env}` doesn't match any per-env group, only `common` is available — references to env-specific variables will fail loudly.
+
+## Secrets
+
+Anything you don't want committed (API keys, tokens, passwords) lives in a sidecar `.secrets` file and is referenced from the project file using the namespaced `${secrets.<key>}` syntax.
+
+### Lookup order
+
+Given a project file `myproj.yaml` and an active `${env}` value of e.g. `dev`:
+
+1. If `--secrets-path FILE` is given on the command line: **only that file** is loaded (and it must exist).
+2. Otherwise, both files below are auto-discovered next to the project file, when present:
+   - `myproj.secrets` — env-agnostic defaults
+   - `myproj.dev.secrets` — env-specific overrides (the basename matches the `${env}` value)
+
+   When both exist, entries from the env-specific file override the defaults.
+
+If neither file exists and no `--secrets-path` is given, the secrets map is simply empty. Referencing `${secrets.X}` with no value for `X` errors out.
+
+### File format
+
+A flat `Map<String, scalar>` in YAML:
+
+```yaml
+# myproj.secrets
+apikey: shared-secret
+db_password: hunter2
+```
+
+### Use anywhere — including inside `variables:`
+
+Secrets are expanded before the variables section is processed, so you can use them to compose other variables:
+
+```yaml
+# myproj.yaml
+variables:
+  api_url: https://api.example.com/?token=${secrets.apikey}
+apps:
+  a:
+    name: my-app
+    kind: node
+    env:
+      API_URL: ${api_url}
+      RAW_KEY: ${secrets.apikey}
+```
+
+### gitignore
+
+The default `.gitignore` already excludes `*.secrets`. Keep it that way — these files are meant to be local-only or distributed through a secret manager out-of-band.
 
 ## Code layout
 
