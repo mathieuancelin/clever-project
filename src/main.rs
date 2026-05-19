@@ -20,6 +20,7 @@ fn main() -> Result<()> {
         cli::Command::Delete(args) => commands::delete::run(args),
         cli::Command::Check(args) => commands::check::run(args),
         cli::Command::Status(args) => commands::status::run(args),
+        cli::Command::Init(args) => commands::init::run(args),
     }
 }
 
