@@ -392,6 +392,41 @@ fn expand_secrets(
     Ok(out)
 }
 
+/// Load a `--variable-path FILE` as a flat list of `(key, value)` pairs.
+/// Accepts YAML or JSON (detected by extension); the file must be a mapping
+/// of scalars (matching the shape of `--variable foo=bar` overrides).
+pub fn load_variables_file(path: &Path) -> Result<Vec<(String, String)>> {
+    let _ = Format::from_path(path)?; // validate extension up front
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading variables file `{}`", path.display()))?;
+    let value: Value = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parsing variables file `{}`", path.display()))?;
+    let mapping = match value {
+        Value::Mapping(m) => m,
+        Value::Null => return Ok(Vec::new()),
+        _ => bail!("variables file `{}` must be a mapping", path.display()),
+    };
+    let mut out = Vec::new();
+    for (k, v) in mapping {
+        let key = k
+            .as_str()
+            .ok_or_else(|| anyhow!("variable keys must be strings (in `{}`)", path.display()))?
+            .to_string();
+        let val = match v {
+            Value::String(s) => s,
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::Null => String::new(),
+            _ => bail!(
+                "variable `{key}` in `{}` must be a scalar (string/number/bool)",
+                path.display()
+            ),
+        };
+        out.push((key, val));
+    }
+    Ok(out)
+}
+
 fn load_value(path: &Path) -> Result<Value> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading project file `{}`", path.display()))?;
@@ -656,6 +691,54 @@ apps:
         let (project, _r) =
             Project::load_and_resolve(&project_path, None, None, &[], Some(&explicit)).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "from-explicit-app");
+    }
+
+    #[test]
+    fn variables_file_yaml_loads_flat_pairs() {
+        let p = write_tmp("yaml", "foo: bar\ncount: 3\nflag: true\n");
+        let pairs = load_variables_file(&p).unwrap();
+        assert_eq!(pairs, vec![
+            ("foo".to_string(), "bar".to_string()),
+            ("count".to_string(), "3".to_string()),
+            ("flag".to_string(), "true".to_string()),
+        ]);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn variables_file_json_loads_flat_pairs() {
+        let p = write_tmp("json", r#"{"foo":"bar","x":"y"}"#);
+        let pairs = load_variables_file(&p).unwrap();
+        assert!(pairs.contains(&("foo".to_string(), "bar".to_string())));
+        assert!(pairs.contains(&("x".to_string(), "y".to_string())));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn variables_file_rejects_nested() {
+        let p = write_tmp("yaml", "outer:\n  nested: value\n");
+        let err = load_variables_file(&p).unwrap_err();
+        assert!(err.to_string().contains("scalar"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn variable_path_overridden_by_explicit_variable() {
+        // Simulate how apply/delete merge sources: file vars are pushed
+        // first, then --variable, so --variable wins.
+        let p = write_tmp("yaml", "foo: from-file\n");
+        let mut combined: Vec<(String, String)> = load_variables_file(&p).unwrap();
+        combined.push(("foo".to_string(), "from-cli".to_string()));
+        // Build a resolver to confirm the last-write-wins behavior.
+        let r = crate::interpolate::Resolver::build(
+            &IndexMap::new(),
+            &combined,
+            "o".to_string(),
+            "par".to_string(),
+        )
+        .unwrap();
+        assert_eq!(r.resolve_string("${foo}").unwrap(), "from-cli");
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]
