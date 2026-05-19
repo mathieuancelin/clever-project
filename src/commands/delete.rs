@@ -7,11 +7,12 @@ use crate::commands::OrgCache;
 use crate::model::Project;
 use crate::state::{ResourceKind, State};
 
-/// Delete every app and addon listed in the project file. Each lookup tries
-/// state first (avoiding an org-wide listing when we already know the id);
-/// on `clever delete` failure we assume the state entry is stale, drop it,
-/// invalidate the cache, and retry once via a fresh listing. Apps are
-/// removed before addons so service links are released first.
+/// Delete every network group, app and addon listed in the project file.
+/// Network groups go first so their members are released before we tear them
+/// down; then apps before addons so service links don't dangle. Each lookup
+/// tries state first (avoiding an org-wide listing when we already know the
+/// id); on `clever delete` failure we assume the state entry is stale, drop
+/// it, invalidate the cache, and retry once via a fresh listing.
 pub fn run(args: DeleteArgs) -> Result<()> {
     let mut variables: Vec<(String, String)> = Vec::new();
     for path in &args.variable_paths {
@@ -41,6 +42,24 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     let mut state = State::load(&args.file)?;
     let mut cache = OrgCache::new();
     let mut failures = 0usize;
+
+    for (key, ng) in &project.network_groups {
+        if let Err(e) = delete_resource(
+            &clever,
+            &mut state,
+            &mut cache,
+            &project,
+            key,
+            &ng.name,
+            ResourceKind::NetworkGroup,
+        ) {
+            warn!(
+                "failed to delete network group `{}`: {e:#} — continuing",
+                ng.name
+            );
+            failures += 1;
+        }
+    }
 
     for (key, app) in &project.apps {
         if let Err(e) = delete_resource(
@@ -103,6 +122,7 @@ fn delete_resource(
     let kind_label = match kind {
         ResourceKind::App => "app",
         ResourceKind::Addon => "addon",
+        ResourceKind::NetworkGroup => "network group",
     };
 
     // Try state first.
@@ -127,7 +147,8 @@ fn delete_resource(
         }
     }
 
-    // Listing path.
+    // Listing path. For NGs we can pass the label directly (clever ng delete
+    // accepts ng-id or ng-label), so no listing call is needed there.
     let fresh_id = match kind {
         ResourceKind::App => cache
             .apps(clever, &project.org)?
@@ -137,6 +158,7 @@ fn delete_resource(
             .addons(clever, &project.org)?
             .get(name)
             .map(|a| a.addon_id.clone()),
+        ResourceKind::NetworkGroup => Some(name.to_string()),
     };
 
     match fresh_id {
@@ -162,5 +184,6 @@ fn call_delete(clever: &Clever, kind: ResourceKind, id: &str, org: &str) -> Resu
     match kind {
         ResourceKind::App => clever.delete_app(id),
         ResourceKind::Addon => clever.delete_addon(id, org),
+        ResourceKind::NetworkGroup => clever.delete_network_group(id, org),
     }
 }
