@@ -154,33 +154,23 @@ impl Project {
                 })?,
         };
 
-        let file_vars: IndexMap<String, String> = match map.get(Value::String("variables".into()))
-        {
-            Some(Value::Mapping(m)) => {
-                let mut out = IndexMap::new();
-                for (k, v) in m {
-                    let key = k
-                        .as_str()
-                        .ok_or_else(|| anyhow!("variable keys must be strings"))?
-                        .to_string();
-                    let val = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Bool(b) => b.to_string(),
-                        Value::Number(n) => n.to_string(),
-                        _ => bail!("variable `{key}` must be a scalar (string/number/bool)"),
-                    };
-                    out.insert(key, val);
-                }
-                out
-            }
-            Some(Value::Null) | None => IndexMap::new(),
-            Some(_) => bail!("`variables` must be a mapping"),
-        };
+        let effective_env = cli_vars
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "env")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "prod".to_string());
+
+        let raw_variables = map
+            .remove(Value::String("variables".into()))
+            .unwrap_or(Value::Null);
+        let file_vars = parse_variables(&raw_variables, &effective_env)?;
 
         let resolver = Resolver::build(&file_vars, cli_vars, org.clone(), region.clone())?;
 
         // Apply CLI overrides into the value tree so the deserialized Project
-        // reflects them.
+        // reflects them. The `variables` section was removed earlier — the
+        // resolver carries the merged values now.
         map.insert(Value::String("org".into()), Value::String(org));
         map.insert(Value::String("region".into()), Value::String(region));
 
@@ -200,6 +190,78 @@ impl Project {
             .with_context(|| format!("writing project file `{}`", path.display()))?;
         Ok(())
     }
+}
+
+/// Parse the project file's `variables` section. Two shapes are accepted:
+///
+/// - **flat**: `Map<String, scalar>` — used as-is.
+/// - **per-env**: `Map<String, Map<String, scalar>>` — entries under the
+///   special key `common` are always included, then entries under the key
+///   matching the resolved `${env}` value are merged on top (overriding
+///   common).
+///
+/// Mixing scalar and mapping values at the top level is rejected.
+fn parse_variables(raw: &Value, env: &str) -> Result<IndexMap<String, String>> {
+    let mapping = match raw {
+        Value::Null => return Ok(IndexMap::new()),
+        Value::Mapping(m) => m,
+        _ => bail!("`variables` must be a mapping"),
+    };
+    if mapping.is_empty() {
+        return Ok(IndexMap::new());
+    }
+
+    let mut saw_scalar = false;
+    let mut saw_mapping = false;
+    for (_, v) in mapping {
+        match v {
+            Value::Mapping(_) => saw_mapping = true,
+            Value::String(_) | Value::Bool(_) | Value::Number(_) | Value::Null => saw_scalar = true,
+            _ => bail!("variable values must be scalars or mappings"),
+        }
+    }
+    if saw_scalar && saw_mapping {
+        bail!(
+            "`variables` must be either a flat map (key=scalar) or a per-env map (key=mapping), not both"
+        );
+    }
+
+    if saw_mapping {
+        let mut out = IndexMap::new();
+        if let Some(Value::Mapping(common)) = mapping.get(Value::String("common".into())) {
+            collect_scalar_entries(common, &mut out, "common")?;
+        }
+        if let Some(Value::Mapping(env_group)) = mapping.get(Value::String(env.into())) {
+            collect_scalar_entries(env_group, &mut out, env)?;
+        }
+        Ok(out)
+    } else {
+        let mut out = IndexMap::new();
+        collect_scalar_entries(mapping, &mut out, "variables")?;
+        Ok(out)
+    }
+}
+
+fn collect_scalar_entries(
+    m: &serde_yaml::Mapping,
+    out: &mut IndexMap<String, String>,
+    where_: &str,
+) -> Result<()> {
+    for (k, v) in m {
+        let key = k
+            .as_str()
+            .ok_or_else(|| anyhow!("variable keys must be strings (in `{where_}`)"))?
+            .to_string();
+        let val = match v {
+            Value::String(s) => s.clone(),
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::Null => String::new(),
+            _ => bail!("variable `{key}` in `{where_}` must be a scalar (string/number/bool)"),
+        };
+        out.insert(key, val);
+    }
+    Ok(())
 }
 
 fn load_value(path: &Path) -> Result<Value> {
@@ -325,6 +387,87 @@ addons:
         let p = write_tmp("json", json);
         let (project, _r) = Project::load_and_resolve(&p, None, None, &[]).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "prod-app");
+        std::fs::remove_file(&p).ok();
+    }
+
+    const PER_ENV: &str = r#"
+name: PE
+org: o
+region: par
+variables:
+  common:
+    domain: foo.bar
+  prod:
+    apikey: secret_for_prod
+  dev:
+    apikey: secret_for_dev
+    domain: dev.bar
+apps:
+  a:
+    name: ${env}-app
+    kind: node
+    env:
+      DOMAIN: ${domain}
+      APIKEY: ${apikey}
+"#;
+
+    #[test]
+    fn per_env_picks_default_prod_group() {
+        let p = write_tmp("yaml", PER_ENV);
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[]).unwrap();
+        let app = project.apps.get("a").unwrap();
+        assert_eq!(app.env.get("DOMAIN").unwrap(), "foo.bar");
+        assert_eq!(app.env.get("APIKEY").unwrap(), "secret_for_prod");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn per_env_dev_group_overrides_common() {
+        let p = write_tmp("yaml", PER_ENV);
+        let (project, _r) = Project::load_and_resolve(
+            &p,
+            None,
+            None,
+            &[("env".to_string(), "dev".to_string())],
+        )
+        .unwrap();
+        let app = project.apps.get("a").unwrap();
+        assert_eq!(app.env.get("DOMAIN").unwrap(), "dev.bar");
+        assert_eq!(app.env.get("APIKEY").unwrap(), "secret_for_dev");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn per_env_unknown_env_uses_common_only_and_errors_on_unknown_ref() {
+        let p = write_tmp("yaml", PER_ENV);
+        // `staging` doesn't match any per-env group, so only `common` is
+        // available. The reference to `${apikey}` in the app's env must error.
+        let err = Project::load_and_resolve(
+            &p,
+            None,
+            None,
+            &[("env".to_string(), "staging".to_string())],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("apikey"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn per_env_rejects_mixed_form() {
+        let mixed = r#"
+name: X
+org: o
+region: par
+variables:
+  flat_thing: hello
+  group:
+    nested: thing
+apps: {}
+"#;
+        let p = write_tmp("yaml", mixed);
+        let err = Project::load_and_resolve(&p, None, None, &[]).unwrap_err();
+        assert!(err.to_string().contains("either"));
         std::fs::remove_file(&p).ok();
     }
 }
