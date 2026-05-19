@@ -99,6 +99,13 @@ pub struct ApplyArgs {
     /// a TTY (CI environments, piped invocations).
     #[arg(long, alias = "auto-approve")]
     pub yes: bool,
+
+    /// Restrict the run to one or more resources. Repeatable. Syntax:
+    /// `apps.KEY`, `addons.KEY`, or `network_groups.KEY` (also `app.`,
+    /// `addon.`, `ng.` as shorter aliases). Without any `--target`, the
+    /// whole project is processed (the default).
+    #[arg(long = "target", value_parser = crate::commands::targets::parse_target_arg)]
+    pub targets: Vec<(crate::commands::targets::TargetKind, String)>,
 }
 
 #[derive(Debug, Args)]
@@ -224,6 +231,11 @@ pub struct DeleteArgs {
     /// a TTY (CI environments, piped invocations).
     #[arg(long, alias = "auto-approve")]
     pub yes: bool,
+
+    /// Restrict the run to one or more resources. Same syntax as apply's
+    /// `--target` (`apps.KEY`, `addons.KEY`, `network_groups.KEY`, ...).
+    #[arg(long = "target", value_parser = crate::commands::targets::parse_target_arg)]
+    pub targets: Vec<(crate::commands::targets::TargetKind, String)>,
 }
 
 #[derive(Debug, Args)]
