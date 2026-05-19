@@ -1,6 +1,6 @@
 # clever-project
 
-Declare your [Clever Cloud](https://www.clever.cloud/) resources in a YAML or JSON file and sync them with a single command. `clever-project` reads the project file and drives the official `clever-tools` CLI to create, update or delete the corresponding apps and addons.
+Declare your [Clever Cloud](https://www.clever.cloud/) resources in a YAML, JSON or TOML file and sync them with a single command. `clever-project` reads the project file and drives the official `clever-tools` CLI to create, update or delete the corresponding apps and addons.
 
 ```sh
 clever-project init
@@ -57,8 +57,11 @@ cargo build --release
 
 ## Quick start
 
+The same project, expressed in each supported format. Pick the one you prefer — the CLI accepts all three interchangeably.
+
+### YAML (`project.clever.yaml`)
+
 ```yaml
-# project.yaml
 name: my-project
 org: orga_xxxxxx-xxxx-xxxxx
 region: par
@@ -83,6 +86,70 @@ addons:
     kind: postgresql
     size: xs_sml
     crypted: true
+```
+
+### JSON (`project.clever.json`)
+
+```json
+{
+  "name": "my-project",
+  "org": "orga_xxxxxx-xxxx-xxxxx",
+  "region": "par",
+  "variables": {
+    "domain": "example.com"
+  },
+  "apps": {
+    "api": {
+      "name": "${env}-api",
+      "kind": "node",
+      "source": { "from": "https://github.com/me/my-api.git" },
+      "domains": ["api.${env}.${domain}"],
+      "env": {
+        "NODE_ENV": "${env}",
+        "PORT": "8080"
+      },
+      "dependencies": ["db"]
+    }
+  },
+  "addons": {
+    "db": {
+      "name": "${env}-api-db",
+      "kind": "postgresql",
+      "size": "xs_sml",
+      "crypted": true
+    }
+  }
+}
+```
+
+### TOML (`project.clever.toml`)
+
+```toml
+name = "my-project"
+org = "orga_xxxxxx-xxxx-xxxxx"
+region = "par"
+
+[variables]
+domain = "example.com"
+
+[apps.api]
+name = "${env}-api"
+kind = "node"
+domains = ["api.${env}.${domain}"]
+dependencies = ["db"]
+
+[apps.api.source]
+from = "https://github.com/me/my-api.git"
+
+[apps.api.env]
+NODE_ENV = "${env}"
+PORT = "8080"
+
+[addons.db]
+name = "${env}-api-db"
+kind = "postgresql"
+size = "xs_sml"
+crypted = true
 ```
 
 ```sh
@@ -110,9 +177,10 @@ clever-project delete --env staging
 
 1. `project.clever.yaml`
 2. `project.clever.yml`
-3. `project.clever.json`
+3. `project.clever.toml`
+4. `project.clever.json`
 
-If none exists, the run aborts with a clear error pointing you at the missing descriptor. Naming your file `project.clever.yaml` and running `clever-project apply --env prod` (no path) is the recommended workflow.
+If none exists, the run aborts with a clear error pointing you at the missing descriptor. Naming your file `project.clever.yaml` (or `.toml` / `.json` — your call) and running `clever-project apply --env prod` (no path) is the recommended workflow.
 
 ### `init`
 
@@ -403,7 +471,9 @@ clever-project read --org <ID> [--app NAME_OR_ID]... [--addon NAME_OR_ID]... [--
 
 ## Project file format
 
-YAML or JSON, detected by extension.
+YAML, JSON or TOML, detected by extension (`.yaml`, `.yml`, `.json`, `.toml`). The same schema applies to all three — pick the one your team is most comfortable with. `read` writes whichever extension you specified for `-o`, and `init` defaults to YAML but accepts any `-o` extension.
+
+### Schema (YAML shown for brevity — JSON and TOML map 1:1)
 
 ```yaml
 name: <project name>
@@ -500,14 +570,28 @@ Always available, can't be redefined in `variables:`:
 
 ### Loading variables from a file
 
+The variables file can be YAML, JSON or TOML — same flat shape, format detected from the extension.
+
 ```yaml
 # vars.yaml
 domain: example.com
 apikey: from-file
 ```
 
+```json
+// vars.json
+{ "domain": "example.com", "apikey": "from-file" }
+```
+
+```toml
+# vars.toml
+domain = "example.com"
+apikey = "from-file"
+```
+
 ```sh
-clever-project apply project.yaml --variable-path vars.yaml
+clever-project apply project.clever.yaml --variable-path vars.yaml
+clever-project apply project.clever.toml --variable-path vars.toml
 ```
 
 The flag is repeatable; later files override earlier ones.
@@ -540,12 +624,18 @@ If neither file exists, the secrets map is simply empty. Referencing `${secrets.
 
 ### File format
 
-A flat `Map<String, scalar>`. The content can be **YAML or JSON** — both parsers are tried and the first one that succeeds wins. The file name is the same either way.
+A flat `Map<String, scalar>`. The content can be **YAML, JSON or TOML** — each parser is tried in turn (root must be a mapping/object/table). The file name is the same either way; the format is inferred from the content.
 
 ```yaml
 # myproj.secrets  (YAML)
 apikey: shared-secret
 db_password: hunter2
+```
+
+```toml
+# myproj.secrets  (TOML)
+apikey = "shared-secret"
+db_password = "hunter2"
 ```
 
 ```json
