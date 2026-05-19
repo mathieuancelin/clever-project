@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
 use tracing::{info, warn};
 
-use crate::cli::ReadArgs;
 use crate::clever::{Clever, ListedAddon, ListedApp};
+use crate::cli::ReadArgs;
 use crate::model::{Addon, App, Project, Source};
 
 pub fn run(args: ReadArgs) -> Result<()> {
@@ -69,15 +69,15 @@ pub fn run(args: ReadArgs) -> Result<()> {
     let mut apps: IndexMap<String, App> = IndexMap::new();
     for listed in &selected_apps {
         info!("reading app `{}` ({})", listed.name, listed.app_id);
-        let env_vars = clever.get_env(&listed.app_id).with_context(|| {
-            format!("reading env of app `{}`", listed.name)
-        })?;
-        let domains = clever.get_domains(&listed.app_id).with_context(|| {
-            format!("reading domains of app `{}`", listed.name)
-        })?;
-        let services = clever.get_services(&listed.app_id).with_context(|| {
-            format!("reading services of app `{}`", listed.name)
-        })?;
+        let env_vars = clever
+            .get_env(&listed.app_id)
+            .with_context(|| format!("reading env of app `{}`", listed.name))?;
+        let domains = clever
+            .get_domains(&listed.app_id)
+            .with_context(|| format!("reading domains of app `{}`", listed.name))?;
+        let services = clever
+            .get_services(&listed.app_id)
+            .with_context(|| format!("reading services of app `{}`", listed.name))?;
 
         let mut dependencies: Vec<String> = Vec::new();
         for s in services.addons {
@@ -99,10 +99,8 @@ pub fn run(args: ReadArgs) -> Result<()> {
             }
         }
 
-        let env: IndexMap<String, String> = env_vars
-            .into_iter()
-            .map(|v| (v.name, v.value))
-            .collect();
+        let env: IndexMap<String, String> =
+            env_vars.into_iter().map(|v| (v.name, v.value)).collect();
 
         let user_domains: Vec<String> = domains
             .into_iter()
@@ -110,10 +108,10 @@ pub fn run(args: ReadArgs) -> Result<()> {
             .filter(|h| !h.ends_with(".cleverapps.io"))
             .collect();
 
-        let source = listed.deploy_url.clone().map(|from| Source {
-            from,
-            branch: None,
-        });
+        let source = listed
+            .deploy_url
+            .clone()
+            .map(|from| Source { from, branch: None });
 
         apps.insert(
             listed.name.clone(),
@@ -182,9 +180,7 @@ fn pick_default_region(apps: &[ListedApp], addons: &[ListedAddon]) -> String {
 }
 
 fn strip_addon_suffix(provider_id: &str) -> &str {
-    provider_id
-        .strip_suffix("-addon")
-        .unwrap_or(provider_id)
+    provider_id.strip_suffix("-addon").unwrap_or(provider_id)
 }
 
 #[cfg(test)]
