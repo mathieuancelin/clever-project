@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
+use serde::Serialize;
 use tracing::info;
 
 use crate::cli::InitArgs;
@@ -21,21 +22,48 @@ pub fn run(args: InitArgs) -> Result<()> {
             output.display()
         );
     }
+    // JSON mode is for scripted use — interactive prompts would block on
+    // stdin and pollute stdout.
+    let mut effective = args;
+    if effective.format.is_json() {
+        effective.non_interactive = true;
+    }
 
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
 
-    let inputs = collect_inputs(&args, &mut stdin, &mut stdout)?;
+    let inputs = collect_inputs(&effective, &mut stdin, &mut stdout)?;
     let project = build_project(&inputs);
 
     project.save(&output)?;
-    info!("wrote `{}`", output.display());
-    eprintln!(
-        "\nNext steps:\n  1. Review and edit `{}` (sizes for addons, env vars, scaling, ...).\n  2. Run `clever-project check --offline` to confirm it's valid.\n  3. Run `clever-project apply --env prod` to create the resources.",
-        output.display()
-    );
+    if effective.format.is_json() {
+        #[derive(Serialize)]
+        struct InitReport {
+            wrote: String,
+            project: String,
+            org: String,
+            apps: Vec<String>,
+            addons: Vec<String>,
+        }
+        let payload = InitReport {
+            wrote: output.display().to_string(),
+            project: inputs.name.clone(),
+            org: inputs.org.clone(),
+            apps: project.apps.values().map(|a| a.name.clone()).collect(),
+            addons: project.addons.values().map(|a| a.name.clone()).collect(),
+        };
+        let out = serde_json::to_string_pretty(&payload)
+            .map_err(|e| anyhow::anyhow!("serializing JSON report: {e}"))?;
+        println!("{out}");
+    } else {
+        info!("wrote `{}`", output.display());
+        eprintln!(
+            "\nNext steps:\n  1. Review and edit `{}` (sizes for addons, env vars, scaling, ...).\n  2. Run `clever-project check --offline` to confirm it's valid.\n  3. Run `clever-project apply --env prod` to create the resources.",
+            output.display()
+        );
+    }
     Ok(())
 }
 
@@ -575,6 +603,7 @@ mod tests {
             output: None,
             non_interactive: true,
             force: false,
+            format: Default::default(),
         };
         let mut stdin = Cursor::new(Vec::new());
         let mut stdout: Vec<u8> = Vec::new();
@@ -595,6 +624,7 @@ mod tests {
             output: None,
             non_interactive: true,
             force: false,
+            format: Default::default(),
         };
         let mut stdin = Cursor::new(Vec::new());
         let mut stdout: Vec<u8> = Vec::new();
@@ -622,6 +652,7 @@ mod tests {
             output: None,
             non_interactive: false,
             force: false,
+            format: Default::default(),
         };
         let inputs = collect_inputs(&args, &mut stdin, &mut stdout).unwrap();
         assert_eq!(inputs.name, "My Stack");
@@ -648,6 +679,7 @@ mod tests {
             output: None,
             non_interactive: false,
             force: false,
+            format: Default::default(),
         };
         let inputs = collect_inputs(&args, &mut stdin, &mut stdout).unwrap();
         assert_eq!(inputs.region, "par");
@@ -671,6 +703,7 @@ mod tests {
             output: None,
             non_interactive: false,
             force: false,
+            format: Default::default(),
         };
         let inputs = collect_inputs(&args, &mut stdin, &mut stdout).unwrap();
         assert_eq!(
