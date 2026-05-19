@@ -63,9 +63,16 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub env: Option<String>,
 
-    /// Set a variable (key=value). Overrides values from the project file.
+    /// Set a variable (key=value). Overrides values from the project file
+    /// and from --variable-path.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
+
+    /// Load variable overrides from a YAML/JSON file (flat key/value
+    /// mapping). Can be repeated; later files override earlier ones, and
+    /// --variable beats anything from these files.
+    #[arg(long = "variable-path")]
+    pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file. When omitted, secrets are
     /// auto-discovered next to the project file (`<stem>.secrets` and
@@ -96,9 +103,16 @@ pub struct DeleteArgs {
     #[arg(long)]
     pub env: Option<String>,
 
-    /// Set a variable (key=value). Overrides values from the project file.
+    /// Set a variable (key=value). Overrides values from the project file
+    /// and from --variable-path.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
+
+    /// Load variable overrides from a YAML/JSON file (flat key/value
+    /// mapping). Can be repeated; later files override earlier ones, and
+    /// --variable beats anything from these files.
+    #[arg(long = "variable-path")]
+    pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file. When omitted, secrets are
     /// auto-discovered next to the project file (`<stem>.secrets` and
