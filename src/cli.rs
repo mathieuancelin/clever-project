@@ -94,6 +94,11 @@ pub struct ApplyArgs {
     /// mutating anything on Clever Cloud.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Skip the interactive confirmation prompt. Required when stdin is not
+    /// a TTY (CI environments, piped invocations).
+    #[arg(long, alias = "auto-approve")]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -214,6 +219,11 @@ pub struct DeleteArgs {
     /// Plan only: log what would be deleted without mutating anything.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Skip the interactive confirmation prompt. Required when stdin is not
+    /// a TTY (CI environments, piped invocations).
+    #[arg(long, alias = "auto-approve")]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
