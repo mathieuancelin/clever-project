@@ -364,11 +364,20 @@ Tag-driven. Pushing an annotated tag matching `v*.*.*` runs `.github/workflows/r
 Setup:
 
 - Add `CARGO_REGISTRY_TOKEN` to the repo secrets (Settings → Secrets and variables → Actions). The publish job runs in a `crates-io` environment — create that environment if you want manual approval before publishing.
-- Cut a release:
+- Cut a release with the helper script (recommended — it does all the safety checks for you):
 
   ```sh
-  # 1. bump version in Cargo.toml, commit
+  ./scripts/release.sh 0.2.0
+  ```
+
+  The script bumps `Cargo.toml`, runs fmt/clippy/tests, commits, tags `v0.2.0`, and pushes (with confirmation prompts). It refuses to run if the tree is dirty, you're not on `main`, the tag already exists, or `main` is out of sync with `origin`.
+
+  To do it manually instead:
+
+  ```sh
+  # 1. bump version in Cargo.toml + Cargo.lock, commit
   # 2. tag and push
   git tag -a v0.2.0 -m "v0.2.0"
+  git push origin main
   git push origin v0.2.0
   ```
