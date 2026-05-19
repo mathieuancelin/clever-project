@@ -8,6 +8,8 @@ use crate::clever::{
     ListedApp, ListedNetworkGroup, NetworkGroupMember,
 };
 use crate::cli::ApplyArgs;
+use crate::commands::live::snapshot as live_snapshot;
+use crate::commands::plan as plan_mod;
 use crate::commands::{OrgCache, resolve_project_file};
 use crate::issues::{self, Issue, IssueSink};
 use crate::model::{Addon, App, NetworkGroup, Project, Source};
@@ -79,6 +81,22 @@ pub fn run(args: ApplyArgs) -> Result<()> {
 
     if !live_issues.is_empty() {
         bail!("{}", issues::render(&live_issues));
+    }
+
+    // Structured plan output: snapshot the live org, compute a per-resource
+    // diff against the project file, and print the result. In --dry-run we
+    // stop here (no mutations). In real apply mode we print the plan as a
+    // header and proceed with the phases.
+    if args.dry_run {
+        let live = live_snapshot(&clever, &project.org)
+            .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
+        let plan = plan_mod::compute(&project, &live);
+        print!("{}", plan_mod::render(&plan, &project));
+        info!(
+            "dry-run: {} mutation(s) would be applied",
+            plan.mutation_count()
+        );
+        return Ok(());
     }
 
     let mut state = State::load(&file)?;
