@@ -153,6 +153,7 @@ pub struct Addon {
 pub enum Format {
     Yaml,
     Json,
+    Toml,
 }
 
 impl Format {
@@ -160,11 +161,12 @@ impl Format {
         match path.extension().and_then(|e| e.to_str()) {
             Some("yaml") | Some("yml") => Ok(Format::Yaml),
             Some("json") => Ok(Format::Json),
+            Some("toml") => Ok(Format::Toml),
             Some(other) => Err(anyhow!(
-                "unsupported file extension `.{other}` (expected .yaml, .yml or .json)"
+                "unsupported file extension `.{other}` (expected .yaml, .yml, .json or .toml)"
             )),
             None => Err(anyhow!(
-                "missing file extension on `{}` (expected .yaml, .yml or .json)",
+                "missing file extension on `{}` (expected .yaml, .yml, .json or .toml)",
                 path.display()
             )),
         }
@@ -223,6 +225,7 @@ impl Project {
         let serialized = match Format::from_path(path)? {
             Format::Yaml => serde_yaml::to_string(self).context("serializing to YAML")?,
             Format::Json => serde_json::to_string_pretty(self).context("serializing to JSON")?,
+            Format::Toml => toml::to_string_pretty(self).context("serializing to TOML")?,
         };
         std::fs::write(path, serialized)
             .with_context(|| format!("writing project file `{}`", path.display()))?;
@@ -431,9 +434,9 @@ fn read_secrets_file(path: &Path, required: bool) -> Result<IndexMap<String, Str
     }
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading secrets file `{}`", path.display()))?;
-    let value = parse_yaml_or_json(&raw).with_context(|| {
+    let value = parse_any(&raw).with_context(|| {
         format!(
-            "parsing secrets file `{}` (neither YAML nor JSON)",
+            "parsing secrets file `{}` (neither YAML, JSON nor TOML)",
             path.display()
         )
     })?;
@@ -463,20 +466,39 @@ fn read_secrets_file(path: &Path, required: bool) -> Result<IndexMap<String, Str
     Ok(out)
 }
 
-/// Try parsing `raw` as YAML, then as JSON; return the first successful one.
-/// JSON is technically a subset of YAML 1.2, so this is mostly a no-op in
-/// practice — but it lets us surface both parser errors when neither works,
-/// and makes the dual support explicit at the call site.
-fn parse_yaml_or_json(raw: &str) -> Result<Value> {
+/// Try parsing `raw` as YAML, then JSON, then TOML; return the first one
+/// that produces a mapping (or null). Used for sidecar files (`.secrets`)
+/// where the format can't be inferred from the extension.
+///
+/// YAML is permissive and would happily slurp TOML content into a single
+/// scalar string, so each successful parse is filtered to "Mapping or
+/// Null" before being returned; anything else falls through to the next
+/// parser. The order is YAML → JSON → TOML.
+fn parse_any(raw: &str) -> Result<Value> {
+    let mut errors: Vec<String> = Vec::new();
     match serde_yaml::from_str::<Value>(raw) {
-        Ok(v) => Ok(v),
-        Err(yaml_err) => match serde_json::from_str::<serde_json::Value>(raw) {
-            Ok(jv) => serde_yaml::to_value(&jv).context("converting parsed JSON to YAML value"),
-            Err(json_err) => Err(anyhow!(
-                "could not parse as YAML or JSON\n  YAML error: {yaml_err}\n  JSON error: {json_err}"
-            )),
-        },
+        Ok(v) if matches!(v, Value::Mapping(_) | Value::Null) => return Ok(v),
+        Ok(_) => errors.push("YAML: parsed but root is not a mapping".to_string()),
+        Err(e) => errors.push(format!("YAML: {e}")),
     }
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(jv) if jv.is_object() || jv.is_null() => {
+            return serde_yaml::to_value(&jv).context("converting parsed JSON to YAML value");
+        }
+        Ok(_) => errors.push("JSON: parsed but root is not an object".to_string()),
+        Err(e) => errors.push(format!("JSON: {e}")),
+    }
+    match toml::from_str::<toml::Value>(raw) {
+        Ok(tv) if tv.is_table() => {
+            return serde_yaml::to_value(tv).context("converting parsed TOML to internal value");
+        }
+        Ok(_) => errors.push("TOML: parsed but root is not a table".to_string()),
+        Err(e) => errors.push(format!("TOML: {e}")),
+    }
+    Err(anyhow!(
+        "could not parse as YAML, JSON or TOML (root must be a mapping/object/table)\n  {}",
+        errors.join("\n  ")
+    ))
 }
 
 /// Expand `${secrets.X}` references inside the values of the project's
@@ -509,14 +531,25 @@ fn expand_secrets(
 }
 
 /// Load a `--variable-path FILE` as a flat list of `(key, value)` pairs.
-/// Accepts YAML or JSON (detected by extension); the file must be a mapping
-/// of scalars (matching the shape of `--variable foo=bar` overrides).
+/// Accepts YAML, JSON or TOML (detected by extension); the file must be a
+/// mapping of scalars (matching the shape of `--variable foo=bar` overrides).
 pub fn load_variables_file(path: &Path) -> Result<Vec<(String, String)>> {
-    let _ = Format::from_path(path)?; // validate extension up front
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading variables file `{}`", path.display()))?;
-    let value: Value = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parsing variables file `{}`", path.display()))?;
+    let value: Value = match Format::from_path(path)? {
+        Format::Yaml | Format::Json => serde_yaml::from_str(&raw)
+            .with_context(|| format!("parsing variables file `{}`", path.display()))?,
+        Format::Toml => {
+            let tv: toml::Value = toml::from_str(&raw)
+                .with_context(|| format!("parsing TOML variables file `{}`", path.display()))?;
+            serde_yaml::to_value(tv).with_context(|| {
+                format!(
+                    "converting TOML variables file `{}` to internal value",
+                    path.display()
+                )
+            })?
+        }
+    };
     let mapping = match value {
         Value::Mapping(m) => m,
         Value::Null => return Ok(Vec::new()),
@@ -587,11 +620,22 @@ fn check_region(where_: &str, value: &str, issues: &mut Vec<Issue>) {
 fn load_value(path: &Path) -> Result<Value> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading project file `{}`", path.display()))?;
-    // JSON is a subset of YAML 1.2, so the YAML parser handles both.
-    let _ = Format::from_path(path)?; // validate extension up front
-    let value: Value =
-        serde_yaml::from_str(&raw).with_context(|| format!("parsing `{}`", path.display()))?;
-    Ok(value)
+    match Format::from_path(path)? {
+        // JSON is a subset of YAML 1.2, so the YAML parser handles both.
+        Format::Yaml | Format::Json => {
+            serde_yaml::from_str(&raw).with_context(|| format!("parsing `{}`", path.display()))
+        }
+        Format::Toml => {
+            let tv: toml::Value = toml::from_str(&raw)
+                .with_context(|| format!("parsing TOML `{}`", path.display()))?;
+            // Funnel TOML into the same serde_yaml::Value the interpolator
+            // walks. `serde_yaml::to_value` accepts any Serialize, so this
+            // bridge is lossless for the scalars/arrays/tables we care
+            // about (TOML datetimes are converted to strings).
+            serde_yaml::to_value(tv)
+                .with_context(|| format!("converting TOML `{}` to internal value", path.display()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -795,6 +839,143 @@ addons:
         let p = write_tmp("json", json);
         let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "prod-app");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn toml_format_works_too() {
+        let toml = r#"
+name = "P"
+org = "o"
+region = "par"
+
+[apps.a]
+name = "${env}-app"
+kind = "node"
+domains = ["api.example.com"]
+
+[apps.a.env]
+PORT = "8080"
+
+[addons.db]
+name = "${env}-db"
+kind = "postgresql"
+size = "xs_sml"
+"#;
+        let p = write_tmp("toml", toml);
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        assert_eq!(project.name, "P");
+        assert_eq!(project.org, "o");
+        let app = project.apps.get("a").unwrap();
+        assert_eq!(app.name, "prod-app");
+        assert_eq!(app.kind, "node");
+        assert_eq!(app.domains, vec!["api.example.com".to_string()]);
+        assert_eq!(app.env.get("PORT").map(String::as_str), Some("8080"));
+        let addon = project.addons.get("db").unwrap();
+        assert_eq!(addon.kind, "postgresql");
+        assert_eq!(addon.size.as_deref(), Some("xs_sml"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn toml_roundtrip_via_save() {
+        // Build a project in memory, save it to .toml, load it back, verify equal.
+        let project = Project {
+            name: "Round trip".into(),
+            description: Some("test".into()),
+            org: "o".into(),
+            region: "par".into(),
+            variables: IndexMap::new(),
+            apps: {
+                let mut m = IndexMap::new();
+                let mut env = IndexMap::new();
+                env.insert("PORT".into(), "8080".into());
+                m.insert(
+                    "api".into(),
+                    App {
+                        name: "prod-api".into(),
+                        kind: "node".into(),
+                        region: None,
+                        source: Some(Source {
+                            from: "https://github.com/me/api.git".into(),
+                            branch: None,
+                        }),
+                        domains: vec!["api.example.com".into()],
+                        scalability: None,
+                        dependencies: vec!["db".into()],
+                        config: IndexMap::new(),
+                        env,
+                    },
+                );
+                m
+            },
+            addons: {
+                let mut m = IndexMap::new();
+                m.insert(
+                    "db".into(),
+                    Addon {
+                        name: "prod-db".into(),
+                        kind: "postgresql".into(),
+                        size: Some("xs_sml".into()),
+                        crypted: true,
+                        region: None,
+                        version: None,
+                        backup_path: None,
+                    },
+                );
+                m
+            },
+            network_groups: IndexMap::new(),
+        };
+
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "clever-project-toml-roundtrip-{}-{}.toml",
+            std::process::id(),
+            rand_suffix()
+        ));
+        project.save(&p).unwrap();
+        // Round-trip through load_and_resolve (it interpolates so use no ${...}).
+        let (reloaded, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        assert_eq!(reloaded.name, "Round trip");
+        assert_eq!(reloaded.org, "o");
+        let api = reloaded.apps.get("api").unwrap();
+        assert_eq!(api.name, "prod-api");
+        assert_eq!(api.kind, "node");
+        assert_eq!(
+            api.source.as_ref().unwrap().from,
+            "https://github.com/me/api.git"
+        );
+        assert_eq!(api.dependencies, vec!["db".to_string()]);
+        assert_eq!(api.env.get("PORT").map(String::as_str), Some("8080"));
+        let db = reloaded.addons.get("db").unwrap();
+        assert_eq!(db.size.as_deref(), Some("xs_sml"));
+        assert!(db.crypted);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn toml_secrets_file_works() {
+        let project_path = write_named(
+            "t.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: ${secrets.apikey}-app\n    kind: node\n",
+        );
+        let dir = project_path.parent().unwrap();
+        // The sidecar is named `.secrets` but contains TOML — parse_any
+        // should pick it up.
+        std::fs::write(dir.join("t.secrets"), "apikey = \"toml-secret\"\n").unwrap();
+        let (project, _r) =
+            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+        assert_eq!(project.apps.get("a").unwrap().name, "toml-secret-app");
+    }
+
+    #[test]
+    fn toml_variables_file_works() {
+        let p = write_tmp("toml", "foo = \"bar\"\ncount = 3\nflag = true\n");
+        let pairs = load_variables_file(&p).unwrap();
+        assert!(pairs.contains(&("foo".to_string(), "bar".to_string())));
+        assert!(pairs.contains(&("count".to_string(), "3".to_string())));
+        assert!(pairs.contains(&("flag".to_string(), "true".to_string())));
         std::fs::remove_file(&p).ok();
     }
 
