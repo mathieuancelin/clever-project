@@ -143,8 +143,9 @@ mod tests {
 
     #[test]
     fn cli_overrides_file() {
-        let file: IndexMap<String, String> =
-            [("foo".to_string(), "fromfile".to_string())].into_iter().collect();
+        let file: IndexMap<String, String> = [("foo".to_string(), "fromfile".to_string())]
+            .into_iter()
+            .collect();
         let r = Resolver::build(
             &file,
             &[("foo".to_string(), "fromcli".to_string())],
@@ -179,7 +180,8 @@ mod tests {
     #[test]
     fn walks_value_tree() {
         let r = r(&[("name", "world")], "o", "par");
-        let mut v: Value = serde_yaml::from_str("greet: hello ${name}\nlist:\n  - ${name}\n  - other\n").unwrap();
+        let mut v: Value =
+            serde_yaml::from_str("greet: hello ${name}\nlist:\n  - ${name}\n  - other\n").unwrap();
         r.resolve_value(&mut v).unwrap();
         let s = serde_yaml::to_string(&v).unwrap();
         assert!(s.contains("hello world"));
