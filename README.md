@@ -9,8 +9,6 @@ See [specs.md](./specs.md) for the detailed specification.
 Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the prototype
 
 ### Done
-- ✅ Cargo skeleton + dependencies (`clap`, `serde`, `serde_yaml`, `serde_json`, `anyhow`, `tracing`, `which`, `indexmap`, `regex`)
-- ✅ Data model + YAML/JSON loading (format detected by file extension)
 - ✅ `${var}` interpolation (file `variables:` section, `--variable foo=bar` CLI overrides take precedence, special variables `${env}`/`${org}`/`${region}`, reserved-name rejection, hard error on missing variable)
 - ✅ Per-env variables: the `variables:` section accepts either a flat `key: value` map (default) or a `group → key: value` map keyed by `${env}` with a special `common` group always merged in
 - ✅ Secrets: `${secrets.foo}` references resolved from a `<project>.secrets` (or `<project>.<env>.secrets`) sidecar file or from `--secrets-path FILE`. Usable inside the `variables:` section too.
@@ -27,7 +25,8 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ Provider-name mapping for addon creation (`postgresql` → `postgresql-addon`, `cellar` → `cellar-addon`, `matomo` → `addon-matomo`, etc. — pass-through for anything unknown)
 - ✅ `--env <value>` shortcut on `apply` and `delete` to set the special `${env}` variable
 - ✅ `--dry-run` flag on `apply` and `delete`: reads current state but logs `[dry-run]` mutations instead of executing them
-- ✅ 34 unit tests green, build with no warnings
+- ✅ Local state file (`<project>.state`, JSON): records `{kind, id, org_id, region, env, name}` per resource; used as a state-first cache to avoid org-wide `clever ... list` calls on `apply`/`delete`. Falls back to listing when a resource is missing from state.
+- ✅ 38 unit tests green, build with no warnings
 
 ### Decisions
 
@@ -48,11 +47,9 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ⛔ **`scalability` on `read`**: `clever scale` has no read/JSON mode. The section can't be regenerated from existing resources (`scalability: None`).
 - ⛔ **Addon updates**: if an addon already exists, no update is performed (neither `size` nor `version`). A warning is logged if the `kind`/`providerId` diverges.
 - ⛔ **`network_groups`**: field present in the model, not handled.
-- ⛔ **`crypted`** on addons: passed as `--option encryption=true` at creation (to be validated per provider), not detected on `read`.
 - ⛔ **`backup_path`** on addons: field present, not handled.
 - ⛔ **Rollback** on partial failure: not implemented (stop + log).
 - ⛔ **Parallelism**: sequential.
-- ⛔ Auto-managed `*.cleverapps.io` domains: excluded from `read` and never removed by `apply`.
 
 ## Usage
 
@@ -210,19 +207,72 @@ apps:
 
 The default `.gitignore` already excludes `*.secrets`. Keep it that way — these files are meant to be local-only or distributed through a secret manager out-of-band.
 
+## State file
+
+After every `apply` and `delete`, the CLI writes a sidecar `<project>.state` JSON file next to the project file. It records the resources currently managed by that project so that the next run can resolve `name → id` correlations without paying for an org-wide `clever ... list` round-trip.
+
+### Format
+
+A JSON array, one entry per resource:
+
+```json
+[
+  {
+    "kind": "app",
+    "id": "app_e9ba25b2-0168-46df-849c-fedf016f3c28",
+    "org_id": "orga_004eedf6-2624-4030-b549-9d4895934f13",
+    "region": "par",
+    "env": "prod",
+    "name": "prod-apptest"
+  },
+  {
+    "kind": "addon",
+    "id": "addon_84758ebf-db0d-40b5-8857-be5b7dce51e6",
+    "org_id": "orga_004eedf6-2624-4030-b549-9d4895934f13",
+    "region": "par",
+    "env": "prod",
+    "name": "prod-apptest-cellar"
+  }
+]
+```
+
+`kind` is one of `app` or `addon`. Multiple envs coexist in the same file (names differ because of `${env}` interpolation), so running `apply --env dev` and `apply --env prod` both write to the same `<project>.state` and entries don't clobber each other.
+
+### Lookup behaviour
+
+On `apply` and `delete`, for each `(name, org_id)` lookup the CLI:
+1. checks the state file first — if there's a matching entry, the id is used directly;
+2. otherwise falls back to a single `clever applications list` or `clever addon list` call, then caches that listing in-memory for the rest of the run.
+
+After every successful create or delete, the state file is updated and written back to disk. On `apply`, when state already has the resource, the kind/source diff check is skipped (state is presumed authoritative since the entry was recorded when the CLI itself created/managed the resource).
+
+### Out-of-sync state
+
+If a resource was deleted out-of-band (Clever console, raw `clever delete`, a colleague's terminal, etc.) the state's `id` becomes stale. The CLI handles this automatically:
+
+- **`apply`** — for apps, the first clever call against a state-known id (the `env` import in `update_app`) acts as a probe. If it fails, the stale state entry is dropped, the in-memory listing cache is invalidated, and we fall back to looking up the resource by name in a fresh `clever applications list`. Addons aren't probed in phase 1, but phase 3 (`clever service link-...`) does the same one-shot retry: if a link fails, state is refreshed against fresh listings, the dep maps are rebuilt, and phase 3 is replayed once.
+- **`delete`** — `clever delete` against a state-known id is the probe. On failure the entry is dropped, listings are refreshed, and the delete is retried via the fresh id (if the resource actually exists under a different id) or skipped with a warning.
+
+In every case the state file is rewritten at the end of the run so subsequent invocations start from a corrected snapshot. You shouldn't need to delete `<project>.state` by hand — but you can, and the next run will rebuild it from scratch.
+
+### gitignore
+
+The default `.gitignore` excludes `*.state`. The file is a per-machine cache that's safe to regenerate from clever-tools, so there's no value in committing it.
+
 ## Code layout
 
 ```
 src/
 ├── main.rs              # entry point + tracing init
 ├── cli.rs               # clap (Cli, Command, ReadArgs, ApplyArgs, DeleteArgs)
-├── model.rs             # Project / App / Addon / ... + load_and_resolve
+├── model.rs             # Project / App / Addon / ... + load_and_resolve + secrets + variable files
 ├── interpolate.rs       # Resolver: ${var}, special variables, Value walk
 ├── clever.rs            # Command::new("clever") wrapper + typed helpers
+├── state.rs             # <project>.state sidecar (load/save/find/upsert)
 └── commands/
     ├── mod.rs
-    ├── apply.rs         # 3 phases: addons → apps (create/update) → service links
-    ├── delete.rs        # apps then addons, looked up by name
+    ├── apply.rs         # 3 phases: addons → apps (create/update) → service links — state-first lookups
+    ├── delete.rs        # apps then addons, state-first lookups with listing fallback
     └── read.rs          # org introspection → Project
 ```
 
