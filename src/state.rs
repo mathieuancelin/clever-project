@@ -10,16 +10,21 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     App,
     Addon,
+    NetworkGroup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateResource {
     pub kind: ResourceKind,
     pub id: String,
+    /// For addons, the underlying provider-specific id (e.g.
+    /// `postgresql_xxx`) used by `clever ng link`. None for apps and NGs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_id: Option<String>,
     pub org_id: String,
     pub region: String,
     pub env: String,
@@ -131,6 +136,7 @@ mod tests {
         s.upsert(StateResource {
             kind: ResourceKind::App,
             id: "app_1".into(),
+            real_id: None,
             org_id: "orga_x".into(),
             region: "par".into(),
             env: "prod".into(),
@@ -151,6 +157,7 @@ mod tests {
         s.upsert(StateResource {
             kind: ResourceKind::Addon,
             id: "addon_1".into(),
+            real_id: None,
             org_id: "o".into(),
             region: "par".into(),
             env: "prod".into(),
@@ -159,6 +166,7 @@ mod tests {
         s.upsert(StateResource {
             kind: ResourceKind::Addon,
             id: "addon_1".into(),
+            real_id: None,
             org_id: "o".into(),
             region: "rbx".into(),
             env: "prod".into(),
@@ -176,6 +184,7 @@ mod tests {
         s.upsert(StateResource {
             kind: ResourceKind::App,
             id: "a".into(),
+            real_id: None,
             org_id: "o".into(),
             region: "par".into(),
             env: "prod".into(),
