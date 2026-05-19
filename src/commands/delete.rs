@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use crate::cli::DeleteArgs;
 use crate::clever::Clever;
+use crate::cli::DeleteArgs;
 use crate::commands::OrgCache;
 use crate::model::Project;
 use crate::state::{ResourceKind, State};
@@ -43,9 +43,15 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     let mut failures = 0usize;
 
     for (key, app) in &project.apps {
-        if let Err(e) =
-            delete_resource(&clever, &mut state, &mut cache, &project, key, &app.name, ResourceKind::App)
-        {
+        if let Err(e) = delete_resource(
+            &clever,
+            &mut state,
+            &mut cache,
+            &project,
+            key,
+            &app.name,
+            ResourceKind::App,
+        ) {
             warn!("failed to delete app `{}`: {e:#} — continuing", app.name);
             failures += 1;
         }
@@ -61,7 +67,10 @@ pub fn run(args: DeleteArgs) -> Result<()> {
             &addon.name,
             ResourceKind::Addon,
         ) {
-            warn!("failed to delete addon `{}`: {e:#} — continuing", addon.name);
+            warn!(
+                "failed to delete addon `{}`: {e:#} — continuing",
+                addon.name
+            );
             failures += 1;
         }
     }
