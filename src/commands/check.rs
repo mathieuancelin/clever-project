@@ -1,0 +1,266 @@
+use std::collections::HashMap;
+
+use anyhow::{Context, Result, bail};
+use tracing::info;
+
+use crate::clever::Clever;
+use crate::cli::CheckArgs;
+use crate::commands::apply::{validate_addons, validate_app_scaling};
+use crate::model::Project;
+
+/// Validate a project file end-to-end without contacting Clever Cloud for
+/// any mutation. By default we still call the read-only Clever API to
+/// validate addon kinds/sizes and app flavor names; `--offline` skips that
+/// step (useful in CI without `clever login`).
+pub fn run(args: CheckArgs) -> Result<()> {
+    let mut variables: Vec<(String, String)> = Vec::new();
+    for path in &args.variable_paths {
+        variables.extend(
+            crate::model::load_variables_file(path)
+                .with_context(|| format!("loading --variable-path `{}`", path.display()))?,
+        );
+    }
+    variables.extend(args.variables);
+    if let Some(env) = args.env {
+        variables.push(("env".to_string(), env));
+    }
+
+    // 1. Load + resolve. Catches: YAML/JSON syntax, missing variables,
+    //    reserved variable redefinition, mixed variables shape, unknown app
+    //    kinds, unknown regions, secrets parse errors.
+    let (mut project, _resolver) = Project::load_and_resolve(
+        &args.file,
+        args.org,
+        args.region,
+        &variables,
+        args.secrets_path.as_deref(),
+    )
+    .with_context(|| format!("loading project `{}`", args.file.display()))?;
+
+    // 2. Static cross-resource checks.
+    validate_dependencies(&project)?;
+    validate_unique_names(&project)?;
+
+    // 3. Optional live API validation (addons catalog + app flavors).
+    if args.offline {
+        info!("--offline set: skipping live API validation");
+    } else {
+        let clever = Clever::new()?;
+        if !project.addons.is_empty() {
+            let providers = clever
+                .list_addon_providers(&project.org)
+                .with_context(|| {
+                    format!(
+                        "fetching addon providers for org `{}` (used to validate addon kinds and sizes)",
+                        project.org
+                    )
+                })?;
+            validate_addons(&mut project.addons, &providers)?;
+        }
+        if project.apps.values().any(|a| {
+            a.scalability
+                .as_ref()
+                .and_then(|s| s.instances.as_ref())
+                .is_some_and(|i| i.min_size.is_some() || i.max_size.is_some())
+        }) {
+            let instances = clever.list_app_instances(&project.org).with_context(|| {
+                format!(
+                    "fetching app instances for org `{}` (used to validate app scaling sizes)",
+                    project.org
+                )
+            })?;
+            validate_app_scaling(&mut project.apps, &instances)?;
+        }
+    }
+
+    info!(
+        "{} apps, {} addons — project file is valid",
+        project.apps.len(),
+        project.addons.len()
+    );
+    Ok(())
+}
+
+/// Every `dependencies` entry of every app must reference an existing
+/// project key (in `apps:` or `addons:`). Also rejects self-dependencies.
+fn validate_dependencies(project: &Project) -> Result<()> {
+    for (app_key, app) in &project.apps {
+        for dep_key in &app.dependencies {
+            if dep_key == app_key {
+                bail!("app `{app_key}` lists itself as a dependency");
+            }
+            let in_apps = project.apps.contains_key(dep_key);
+            let in_addons = project.addons.contains_key(dep_key);
+            if !in_apps && !in_addons {
+                bail!(
+                    "app `{app_key}` has unknown dependency `{dep_key}`: not a project key in `apps:` or `addons:`"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resource names must be unique among apps, and unique among addons. An
+/// app and an addon can share a name (they're different resource types on
+/// Clever), but two apps or two addons sharing a name would clash on
+/// `name → id` lookups.
+fn validate_unique_names(project: &Project) -> Result<()> {
+    let mut seen_apps: HashMap<&str, &str> = HashMap::new();
+    for (key, app) in &project.apps {
+        if app.name.trim().is_empty() {
+            bail!("app `{key}` has an empty `name`");
+        }
+        if let Some(prev) = seen_apps.insert(&app.name, key) {
+            bail!(
+                "apps `{prev}` and `{key}` both resolve to the same name `{}`",
+                app.name
+            );
+        }
+    }
+    let mut seen_addons: HashMap<&str, &str> = HashMap::new();
+    for (key, addon) in &project.addons {
+        if addon.name.trim().is_empty() {
+            bail!("addon `{key}` has an empty `name`");
+        }
+        if let Some(prev) = seen_addons.insert(&addon.name, key) {
+            bail!(
+                "addons `{prev}` and `{key}` both resolve to the same name `{}`",
+                addon.name
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Addon, App};
+    use indexmap::IndexMap;
+
+    fn empty_app(name: &str, kind: &str) -> App {
+        App {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            region: None,
+            source: None,
+            domains: vec![],
+            scalability: None,
+            dependencies: vec![],
+            config: IndexMap::new(),
+            env: IndexMap::new(),
+        }
+    }
+
+    fn empty_addon(name: &str, kind: &str) -> Addon {
+        Addon {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            size: None,
+            crypted: false,
+            region: None,
+            version: None,
+            backup_path: None,
+        }
+    }
+
+    fn make_project() -> Project {
+        Project {
+            name: "p".into(),
+            description: None,
+            org: "o".into(),
+            region: "par".into(),
+            variables: IndexMap::new(),
+            apps: IndexMap::new(),
+            addons: IndexMap::new(),
+            network_groups: None,
+        }
+    }
+
+    #[test]
+    fn dependencies_must_reference_known_keys() {
+        let mut project = make_project();
+        let mut app = empty_app("api", "node");
+        app.dependencies = vec!["does-not-exist".to_string()];
+        project.apps.insert("api".to_string(), app);
+        let err = validate_dependencies(&project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unknown dependency `does-not-exist`"));
+    }
+
+    #[test]
+    fn self_dependency_is_rejected() {
+        let mut project = make_project();
+        let mut app = empty_app("api", "node");
+        app.dependencies = vec!["api".to_string()];
+        project.apps.insert("api".to_string(), app);
+        let err = validate_dependencies(&project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("itself"));
+    }
+
+    #[test]
+    fn valid_dependencies_pass() {
+        let mut project = make_project();
+        let mut api = empty_app("api", "node");
+        api.dependencies = vec!["db".to_string(), "worker".to_string()];
+        project.apps.insert("api".to_string(), api);
+        project
+            .apps
+            .insert("worker".to_string(), empty_app("worker", "node"));
+        project
+            .addons
+            .insert("db".to_string(), empty_addon("db", "postgresql"));
+        validate_dependencies(&project).unwrap();
+    }
+
+    #[test]
+    fn duplicate_app_names_rejected() {
+        let mut project = make_project();
+        project
+            .apps
+            .insert("a".to_string(), empty_app("same-name", "node"));
+        project
+            .apps
+            .insert("b".to_string(), empty_app("same-name", "node"));
+        let err = validate_unique_names(&project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("same-name"));
+    }
+
+    #[test]
+    fn duplicate_addon_names_rejected() {
+        let mut project = make_project();
+        project
+            .addons
+            .insert("a".to_string(), empty_addon("the-db", "postgresql"));
+        project
+            .addons
+            .insert("b".to_string(), empty_addon("the-db", "postgresql"));
+        let err = validate_unique_names(&project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("the-db"));
+    }
+
+    #[test]
+    fn app_and_addon_can_share_a_name() {
+        let mut project = make_project();
+        project
+            .apps
+            .insert("a".to_string(), empty_app("dual", "node"));
+        project
+            .addons
+            .insert("d".to_string(), empty_addon("dual", "postgresql"));
+        validate_unique_names(&project).unwrap();
+    }
+
+    #[test]
+    fn empty_app_name_rejected() {
+        let mut project = make_project();
+        project.apps.insert("a".to_string(), empty_app("", "node"));
+        let err = validate_unique_names(&project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("empty"));
+    }
+}
