@@ -6,6 +6,7 @@ use tracing::info;
 use crate::clever::Clever;
 use crate::cli::CheckArgs;
 use crate::commands::apply::{validate_addons, validate_app_scaling};
+use crate::commands::resolve_project_file;
 use crate::model::Project;
 
 /// Validate a project file end-to-end without contacting Clever Cloud for
@@ -28,14 +29,15 @@ pub fn run(args: CheckArgs) -> Result<()> {
     // 1. Load + resolve. Catches: YAML/JSON syntax, missing variables,
     //    reserved variable redefinition, mixed variables shape, unknown app
     //    kinds, unknown regions, secrets parse errors.
+    let file = resolve_project_file(args.file, &std::env::current_dir()?)?;
     let (mut project, _resolver) = Project::load_and_resolve(
-        &args.file,
+        &file,
         args.org,
         args.region,
         &variables,
         args.secrets_path.as_deref(),
     )
-    .with_context(|| format!("loading project `{}`", args.file.display()))?;
+    .with_context(|| format!("loading project `{}`", file.display()))?;
 
     // 2. Static cross-resource checks.
     validate_dependencies(&project)?;
