@@ -1,6 +1,6 @@
 # clever-project
 
-Declare your Clever Cloud resources in a YAML or JSON file and sync them with a single command. `clever-project` reads the project file and drives the official `clever-tools` CLI to create, update or delete the corresponding apps and addons.
+Declare your [Clever Cloud](https://www.clever.cloud/) resources in a YAML or JSON file and sync them with a single command. `clever-project` reads the project file and drives the official `clever-tools` CLI to create, update or delete the corresponding apps and addons.
 
 ```sh
 clever-project apply project.yaml --env prod
