@@ -188,9 +188,22 @@ Options:
 | `--variable-path <FILE>` | Load variable overrides from a YAML/JSON file (repeatable) |
 | `--secrets-path <FILE>` | Explicit secrets file (otherwise auto-discovered, see below) |
 | `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
+| `--yes` / `--auto-approve` | Skip the confirmation prompt. Required when stdin is not a TTY. |
 | `-v, --verbose` | More log lines (`debug` level) |
 
 Apps with a GitHub `source.from` are created with `clever create --github owner/repo`. Non-GitHub sources create an empty app — push your code to the Clever remote yourself afterwards.
+
+**Confirmation gate.** Before touching anything, `apply` prints a structured plan (same one as `--dry-run`, see below) and prompts:
+
+```
+Apply these changes? [y/N]:
+```
+
+The default is **no** — hitting Enter aborts. Type `y` to proceed.
+
+- Pass `--yes` (or `--auto-approve`) to skip the prompt. This is required when stdin is not a TTY (CI environments, piped invocations): without it, apply fails loud with `stdin is not a TTY and --yes was not given`.
+- If the plan has no mutations (everything is already in sync), the prompt is skipped and apply exits 0.
+- `--dry-run` always short-circuits: it prints the plan and exits, prompt or no prompt.
 
 **Dry-run plan.** `--dry-run` produces a Terraform-style plan instead of running the phases: the CLI snapshots the live org, computes a per-resource diff against the project file, and prints it in one block:
 
@@ -243,7 +256,24 @@ Delete the resources listed in the project file. Network groups are removed firs
 clever-project delete [FILE] [OPTIONS]
 ```
 
-Same flags as `apply` (minus `--region`).
+Same flags as `apply` (minus `--region`), including `--yes` / `--auto-approve`.
+
+**Confirmation gate.** Like `apply`, `delete` prints a plan and prompts before doing anything:
+
+```
+Plan for project `My Stack` against org `orga_xxx`:
+  3 to destroy: 1 network_group, 1 app, 1 addon.
+
+  - network_group "vpn"
+  - app "prod-api"
+  - addon "prod-db"
+
+Destroy these resources? [y/N]:
+```
+
+Default is **no**. Pass `--yes` to skip the prompt (required in non-TTY contexts). `--dry-run` prints the plan and exits without prompting.
+
+The plan is built purely from the project file — no Clever API call is made at this stage. Resources that have already been deleted out of band are detected at run time and skipped with a warning (consistent with delete's best-effort semantics).
 
 ### `check`
 
