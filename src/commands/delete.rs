@@ -1,15 +1,17 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::cli::DeleteArgs;
 use crate::clever::Clever;
+use crate::commands::OrgCache;
 use crate::model::Project;
+use crate::state::{ResourceKind, State};
 
-/// Delete every app and addon listed in the project file, looked up by `name`
-/// inside the target organisation. Apps are deleted first so any service
-/// links from app → addon are released before we touch the addons.
+/// Delete every app and addon listed in the project file. Each lookup tries
+/// state first (avoiding an org-wide listing when we already know the id);
+/// on `clever delete` failure we assume the state entry is stale, drop it,
+/// invalidate the cache, and retry once via a fresh listing. Apps are
+/// removed before addons so service links are released first.
 pub fn run(args: DeleteArgs) -> Result<()> {
     let mut variables: Vec<(String, String)> = Vec::new();
     for path in &args.variable_paths {
@@ -36,56 +38,38 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         info!("[dry-run] no mutations will be sent to Clever Cloud");
     }
 
-    let existing_apps = clever
-        .list_apps(&project.org)
-        .with_context(|| format!("listing applications in org `{}`", project.org))?;
-    let app_by_name: HashMap<String, String> = existing_apps
-        .into_iter()
-        .map(|a| (a.name, a.app_id))
-        .collect();
-
+    let mut state = State::load(&args.file)?;
+    let mut cache = OrgCache::new();
     let mut failures = 0usize;
+
     for (key, app) in &project.apps {
-        match app_by_name.get(&app.name) {
-            Some(id) => {
-                info!("deleting app `{}` ({}) [project key: {key}]", app.name, id);
-                if let Err(e) = clever.delete_app(id) {
-                    warn!("failed to delete app `{}`: {e:#} — continuing", app.name);
-                    failures += 1;
-                }
-            }
-            None => warn!(
-                "app `{}` not found in org `{}` — skipping",
-                app.name, project.org
-            ),
+        if let Err(e) =
+            delete_resource(&clever, &mut state, &mut cache, &project, key, &app.name, ResourceKind::App)
+        {
+            warn!("failed to delete app `{}`: {e:#} — continuing", app.name);
+            failures += 1;
         }
     }
 
-    let existing_addons = clever
-        .list_addons(&project.org)
-        .with_context(|| format!("listing addons in org `{}`", project.org))?;
-    let addon_by_name: HashMap<String, String> = existing_addons
-        .into_iter()
-        .map(|a| (a.name, a.addon_id))
-        .collect();
-
     for (key, addon) in &project.addons {
-        match addon_by_name.get(&addon.name) {
-            Some(id) => {
-                info!(
-                    "deleting addon `{}` ({}) [project key: {key}]",
-                    addon.name, id
-                );
-                if let Err(e) = clever.delete_addon(id, &project.org) {
-                    warn!("failed to delete addon `{}`: {e:#} — continuing", addon.name);
-                    failures += 1;
-                }
-            }
-            None => warn!(
-                "addon `{}` not found in org `{}` — skipping",
-                addon.name, project.org
-            ),
+        if let Err(e) = delete_resource(
+            &clever,
+            &mut state,
+            &mut cache,
+            &project,
+            key,
+            &addon.name,
+            ResourceKind::Addon,
+        ) {
+            warn!("failed to delete addon `{}`: {e:#} — continuing", addon.name);
+            failures += 1;
         }
+    }
+
+    if !clever.is_dry_run() {
+        state
+            .save()
+            .with_context(|| format!("saving state file `{}`", state.path().display()))?;
     }
 
     if failures > 0 {
@@ -94,4 +78,80 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         info!("delete complete");
     }
     Ok(())
+}
+
+/// Resolve `name` to an id (state first, then a fresh listing on miss or
+/// after a stale-state failure), call `clever delete`, and update state.
+fn delete_resource(
+    clever: &Clever,
+    state: &mut State,
+    cache: &mut OrgCache,
+    project: &Project,
+    key: &str,
+    name: &str,
+    kind: ResourceKind,
+) -> Result<()> {
+    let kind_label = match kind {
+        ResourceKind::App => "app",
+        ResourceKind::Addon => "addon",
+    };
+
+    // Try state first.
+    if let Some(r) = state.find(kind, name, &project.org) {
+        let id = r.id.clone();
+        info!("deleting {kind_label} `{name}` ({id}) [project key: {key}, from state]");
+        match call_delete(clever, kind, &id, &project.org) {
+            Ok(()) => {
+                if !clever.is_dry_run() {
+                    state.remove_by_id(&id);
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    "delete via state-known id `{id}` failed: {e:#} — dropping stale entry and refreshing from clever"
+                );
+                state.remove_by_id(&id);
+                cache.invalidate();
+                // fall through to listing path
+            }
+        }
+    }
+
+    // Listing path.
+    let fresh_id = match kind {
+        ResourceKind::App => cache
+            .apps(clever, &project.org)?
+            .get(name)
+            .map(|a| a.app_id.clone()),
+        ResourceKind::Addon => cache
+            .addons(clever, &project.org)?
+            .get(name)
+            .map(|a| a.addon_id.clone()),
+    };
+
+    match fresh_id {
+        Some(id) => {
+            info!("deleting {kind_label} `{name}` ({id}) [project key: {key}, from listing]");
+            call_delete(clever, kind, &id, &project.org)?;
+            if !clever.is_dry_run() {
+                state.remove_by_id(&id);
+            }
+            Ok(())
+        }
+        None => {
+            warn!(
+                "{kind_label} `{name}` not found in state or org `{}` — skipping",
+                project.org
+            );
+            Ok(())
+        }
+    }
+}
+
+fn call_delete(clever: &Clever, kind: ResourceKind, id: &str, org: &str) -> Result<()> {
+    match kind {
+        ResourceKind::App => clever.delete_app(id),
+        ResourceKind::Addon => clever.delete_addon(id, org),
+    }
 }
