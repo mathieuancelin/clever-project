@@ -3,7 +3,7 @@ use tracing::{info, warn};
 
 use crate::clever::Clever;
 use crate::cli::DeleteArgs;
-use crate::commands::OrgCache;
+use crate::commands::{OrgCache, resolve_project_file};
 use crate::model::Project;
 use crate::state::{ResourceKind, State};
 
@@ -25,21 +25,22 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     if let Some(env) = args.env {
         variables.push(("env".to_string(), env));
     }
+    let file = resolve_project_file(args.file, &std::env::current_dir()?)?;
     let (project, _resolver) = Project::load_and_resolve(
-        &args.file,
+        &file,
         args.org,
         args.region,
         &variables,
         args.secrets_path.as_deref(),
     )
-    .with_context(|| format!("loading project `{}`", args.file.display()))?;
+    .with_context(|| format!("loading project `{}`", file.display()))?;
 
     let clever = Clever::new()?.with_dry_run(args.dry_run);
     if clever.is_dry_run() {
         info!("[dry-run] no mutations will be sent to Clever Cloud");
     }
 
-    let mut state = State::load(&args.file)?;
+    let mut state = State::load(&file)?;
     let mut cache = OrgCache::new();
     let mut failures = 0usize;
 
