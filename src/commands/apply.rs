@@ -4,11 +4,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use tracing::{info, warn};
 
 use crate::clever::{
-    AddonProvider, AppInstance, Clever, CreateAddon, CreateApp, ListedAddon, ListedApp,
+    AddonProvider, AppInstance, Clever, CreateAddon, CreateApp, CreateNetworkGroup, ListedAddon,
+    ListedApp, ListedNetworkGroup, NetworkGroupMember,
 };
 use crate::cli::ApplyArgs;
 use crate::commands::OrgCache;
-use crate::model::{Addon, App, Project, Source};
+use crate::model::{Addon, App, NetworkGroup, Project, Source};
 use crate::state::{ResourceKind, State, StateResource};
 use indexmap::IndexMap;
 
@@ -189,7 +190,51 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         }
     };
 
-    // Phase 4 — restart apps where it matters.
+    // Phase 4 — network groups. Create the missing ones with their members
+    // attached, sync the existing ones' members against the project. Has to
+    // run after phase 1 + 2 so app ids and addon real-ids are known.
+    if !project.network_groups.is_empty() {
+        // Build the addon real-id map (needed for NG `link` arguments).
+        let mut addon_real_id_by_key: HashMap<String, String> = HashMap::new();
+        for (key, addon) in &project.addons {
+            let from_state = state
+                .find(ResourceKind::Addon, &addon.name, &project.org)
+                .and_then(|r| r.real_id.clone());
+            if let Some(rid) = from_state {
+                addon_real_id_by_key.insert(key.clone(), rid);
+                continue;
+            }
+            // Old state file or fresh addon: pull from the listing once.
+            let listed = cache.addons(&clever, &project.org)?;
+            if let Some(la) = listed.get(&addon.name) {
+                let rid = la.real_id.clone();
+                // Persist for next runs.
+                if !clever.is_dry_run() {
+                    if let Some(existing) = state
+                        .find(ResourceKind::Addon, &addon.name, &project.org)
+                        .cloned()
+                    {
+                        state.upsert(StateResource {
+                            real_id: Some(rid.clone()),
+                            ..existing
+                        });
+                    }
+                }
+                addon_real_id_by_key.insert(key.clone(), rid);
+            }
+        }
+
+        sync_network_groups(
+            &clever,
+            &mut state,
+            &project,
+            &effective_env,
+            &app_id_by_key,
+            &addon_real_id_by_key,
+        )?;
+    }
+
+    // Phase 5 — restart apps where it matters.
     //   - just created with github  → restart triggers the first deploy
     //   - already existed and env or dependencies changed → restart
     //   - created without github    → nothing to deploy yet, skip
@@ -269,6 +314,7 @@ fn handle_addon(
             state.upsert(StateResource {
                 kind: ResourceKind::Addon,
                 id: found.addon_id.clone(),
+                real_id: Some(found.real_id.clone()),
                 org_id: project.org.clone(),
                 region: found.region.clone(),
                 env: env.to_string(),
@@ -286,7 +332,7 @@ fn handle_addon(
         .transpose()?;
     let provider = resolve_provider(&addon.kind);
     info!("creating addon `{}` [project key: {key}]", addon.name);
-    let id = clever.create_addon(&CreateAddon {
+    let created = clever.create_addon(&CreateAddon {
         provider,
         name: &addon.name,
         org: &project.org,
@@ -298,14 +344,15 @@ fn handle_addon(
     if !clever.is_dry_run() {
         state.upsert(StateResource {
             kind: ResourceKind::Addon,
-            id: id.clone(),
+            id: created.addon_id.clone(),
+            real_id: Some(created.real_id),
             org_id: project.org.clone(),
             region: region.to_string(),
             env: env.to_string(),
             name: addon.name.clone(),
         });
     }
-    Ok(id)
+    Ok(created.addon_id)
 }
 
 /// Outcome of bringing one app into the desired state.
@@ -394,6 +441,7 @@ fn handle_app(
             state.upsert(StateResource {
                 kind: ResourceKind::App,
                 id: found.app_id.clone(),
+                real_id: None,
                 org_id: project.org.clone(),
                 region: found.zone.clone(),
                 env: env.to_string(),
@@ -434,6 +482,7 @@ fn handle_app(
         state.upsert(StateResource {
             kind: ResourceKind::App,
             id: id.clone(),
+            real_id: None,
             org_id: project.org.clone(),
             region: region.to_string(),
             env: env.to_string(),
@@ -481,6 +530,7 @@ fn refresh_dep_maps(
                     state.upsert(StateResource {
                         kind: ResourceKind::Addon,
                         id: found.addon_id.clone(),
+                        real_id: Some(found.real_id.clone()),
                         org_id: project.org.clone(),
                         region: found.region.clone(),
                         env: env.to_string(),
@@ -515,6 +565,7 @@ fn refresh_dep_maps(
                     state.upsert(StateResource {
                         kind: ResourceKind::App,
                         id: found.app_id.clone(),
+                        real_id: None,
                         org_id: project.org.clone(),
                         region: found.zone.clone(),
                         env: env.to_string(),
@@ -896,6 +947,148 @@ fn yaml_scalar_to_string(v: &serde_yaml::Value) -> Result<String> {
         serde_yaml::Value::Bool(b) => Ok(b.to_string()),
         _ => bail!("expected a scalar (string/number/bool), got `{v:?}`"),
     }
+}
+
+/// Resolve each project NG to a clever id (state first, listing fallback,
+/// create if missing) and sync its member list to match the project file.
+fn sync_network_groups(
+    clever: &Clever,
+    state: &mut State,
+    project: &Project,
+    env: &str,
+    app_id_by_key: &HashMap<String, String>,
+    addon_real_id_by_key: &HashMap<String, String>,
+) -> Result<()> {
+    // Fetch the org-wide NG list once for existence checks and member diffs.
+    // (No analogue to OrgCache here — NGs are a separate listing.)
+    let mut listed: Option<HashMap<String, ListedNetworkGroup>> = None;
+
+    for (key, ng) in &project.network_groups {
+        let desired_members = resolve_ng_members(ng, app_id_by_key, addon_real_id_by_key, key)?;
+
+        // Resolve to (ng_id, current_member_ids).
+        let (ng_id, current_members, was_just_created) =
+            match state.find(ResourceKind::NetworkGroup, &ng.name, &project.org) {
+                Some(r) => {
+                    let id = r.id.clone();
+                    ensure_ng_listing_loaded(clever, &project.org, &mut listed)?;
+                    let members = listed
+                        .as_ref()
+                        .unwrap()
+                        .values()
+                        .find(|n| n.id == id)
+                        .map(|n| {
+                            n.members
+                                .iter()
+                                .map(|m: &NetworkGroupMember| m.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    (id, members, false)
+                }
+                None => {
+                    ensure_ng_listing_loaded(clever, &project.org, &mut listed)?;
+                    match listed.as_ref().unwrap().get(&ng.name).cloned() {
+                        Some(found) => {
+                            let id = found.id.clone();
+                            let members = found
+                                .members
+                                .iter()
+                                .map(|m| m.id.clone())
+                                .collect::<Vec<_>>();
+                            if !clever.is_dry_run() {
+                                state.upsert(StateResource {
+                                    kind: ResourceKind::NetworkGroup,
+                                    id: id.clone(),
+                                    real_id: None,
+                                    org_id: project.org.clone(),
+                                    region: project.region.clone(),
+                                    env: env.to_string(),
+                                    name: ng.name.clone(),
+                                });
+                            }
+                            info!(
+                                "network group `{}` already exists ({}) [project key: {key}]",
+                                ng.name, id
+                            );
+                            (id, members, false)
+                        }
+                        None => {
+                            info!("creating network group `{}` [project key: {key}]", ng.name);
+                            let id = clever.create_network_group(&CreateNetworkGroup {
+                                label: &ng.name,
+                                org: &project.org,
+                                description: ng.description.as_deref(),
+                                members: &desired_members,
+                            })?;
+                            if !clever.is_dry_run() {
+                                state.upsert(StateResource {
+                                    kind: ResourceKind::NetworkGroup,
+                                    id: id.clone(),
+                                    real_id: None,
+                                    org_id: project.org.clone(),
+                                    region: project.region.clone(),
+                                    env: env.to_string(),
+                                    name: ng.name.clone(),
+                                });
+                            }
+                            // Members were attached via `--link` at create time.
+                            (id, desired_members.clone(), true)
+                        }
+                    }
+                }
+            };
+
+        if was_just_created {
+            continue;
+        }
+
+        // Sync members against the desired set.
+        use std::collections::HashSet;
+        let desired: HashSet<&str> = desired_members.iter().map(String::as_str).collect();
+        let current: HashSet<&str> = current_members.iter().map(String::as_str).collect();
+        for id in desired.difference(&current) {
+            clever.ng_link(id, &ng_id, &project.org)?;
+        }
+        for id in current.difference(&desired) {
+            clever.ng_unlink(id, &ng_id, &project.org)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_ng_listing_loaded(
+    clever: &Clever,
+    org: &str,
+    listed: &mut Option<HashMap<String, ListedNetworkGroup>>,
+) -> Result<()> {
+    if listed.is_none() {
+        info!("listing network groups in org `{org}`");
+        let ngs = clever.list_network_groups(org)?;
+        *listed = Some(ngs.into_iter().map(|n| (n.label.clone(), n)).collect());
+    }
+    Ok(())
+}
+
+fn resolve_ng_members(
+    ng: &NetworkGroup,
+    app_id_by_key: &HashMap<String, String>,
+    addon_real_id_by_key: &HashMap<String, String>,
+    ng_key: &str,
+) -> Result<Vec<String>> {
+    let mut out = Vec::with_capacity(ng.link.len());
+    for dep_key in &ng.link {
+        if let Some(id) = app_id_by_key.get(dep_key) {
+            out.push(id.clone());
+        } else if let Some(rid) = addon_real_id_by_key.get(dep_key) {
+            out.push(rid.clone());
+        } else {
+            bail!(
+                "network group `{ng_key}` links unknown project key `{dep_key}` (not in `apps:` or `addons:`, or its real-id couldn't be resolved)"
+            );
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
