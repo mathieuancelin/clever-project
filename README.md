@@ -187,10 +187,43 @@ Options:
 | `--variable key=value` | One-off variable override (repeatable) |
 | `--variable-path <FILE>` | Load variable overrides from a YAML/JSON file (repeatable) |
 | `--secrets-path <FILE>` | Explicit secrets file (otherwise auto-discovered, see below) |
-| `--dry-run` | Read current state and log mutations as `[dry-run] would ...`, no changes applied |
+| `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
 | `-v, --verbose` | More log lines (`debug` level) |
 
 Apps with a GitHub `source.from` are created with `clever create --github owner/repo`. Non-GitHub sources create an empty app — push your code to the Clever remote yourself afterwards.
+
+**Dry-run plan.** `--dry-run` produces a Terraform-style plan instead of running the phases: the CLI snapshots the live org, computes a per-resource diff against the project file, and prints it in one block:
+
+```
+Plan for project `My Stack` against org `orga_xxx` (default region `par`):
+  2 to create, 1 to update, 3 unchanged.
+
+  + addon "prod-cache" (redis, xs_sml, region=par)
+  = addon "prod-db"
+  + app "prod-api" (node, region=par, github=https://github.com/me/api.git)
+      env:
+        + NODE_ENV = "prod"
+        + PORT = "8080"
+      domains:
+        + api.example.com
+      dependencies:
+        + prod-cache
+        + prod-db
+  ~ app "prod-worker"
+      env:
+        + RUST_LOG = "info"
+        - DEBUG = "true"
+        ~ PORT: "8080" → "3000"
+      domains:
+        + worker.example.com
+        - old.worker.example.com
+  = app "prod-static"
+  = network_group "vpn"
+```
+
+The plan only counts as "to update" diffs that `apply` will actually rewrite: `env`, `domains`, `dependencies` on existing apps; member set on existing network groups. Drift on fields apply won't auto-update (app `kind`, `region`, `source.from`, anything on existing addons) is surfaced below the verdict with a `!` so you know to recreate manually if needed.
+
+`*.cleverapps.io` domains are filtered out before diffing, matching apply's runtime behaviour (it never removes them).
 
 **Phases.** `apply` runs in this order: (1) addons, (2) apps create/update, (3) service links between apps and addons, (4) network groups (create + member sync), (5) restarts. Each phase only mutates Clever when the diff requires it.
 
