@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod check;
 pub mod delete;
+pub mod init;
 pub mod live;
 pub mod read;
 pub mod status;
