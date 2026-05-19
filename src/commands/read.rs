@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
+use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::clever::{Clever, ListedAddon, ListedApp};
@@ -160,7 +161,26 @@ pub fn run(args: ReadArgs) -> Result<()> {
     project
         .save(&args.output)
         .with_context(|| format!("writing project file `{}`", args.output.display()))?;
-    info!("wrote project to `{}`", args.output.display());
+
+    if args.format.is_json() {
+        #[derive(Serialize)]
+        struct ReadReport {
+            wrote: String,
+            org: String,
+            apps: usize,
+            addons: usize,
+        }
+        let payload = ReadReport {
+            wrote: args.output.display().to_string(),
+            org: args.org.clone(),
+            apps: project.apps.len(),
+            addons: project.addons.len(),
+        };
+        let out = serde_json::to_string_pretty(&payload).context("serializing JSON report")?;
+        println!("{out}");
+    } else {
+        info!("wrote project to `{}`", args.output.display());
+    }
     Ok(())
 }
 
