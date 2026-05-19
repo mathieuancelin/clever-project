@@ -36,13 +36,15 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         .map(|a| (a.name, a.app_id))
         .collect();
 
+    let mut failures = 0usize;
     for (key, app) in &project.apps {
         match app_by_name.get(&app.name) {
             Some(id) => {
                 info!("deleting app `{}` ({}) [project key: {key}]", app.name, id);
-                clever
-                    .delete_app(id)
-                    .with_context(|| format!("deleting app `{}`", app.name))?;
+                if let Err(e) = clever.delete_app(id) {
+                    warn!("failed to delete app `{}`: {e:#} — continuing", app.name);
+                    failures += 1;
+                }
             }
             None => warn!(
                 "app `{}` not found in org `{}` — skipping",
@@ -66,9 +68,10 @@ pub fn run(args: DeleteArgs) -> Result<()> {
                     "deleting addon `{}` ({}) [project key: {key}]",
                     addon.name, id
                 );
-                clever
-                    .delete_addon(id, &project.org)
-                    .with_context(|| format!("deleting addon `{}`", addon.name))?;
+                if let Err(e) = clever.delete_addon(id, &project.org) {
+                    warn!("failed to delete addon `{}`: {e:#} — continuing", addon.name);
+                    failures += 1;
+                }
             }
             None => warn!(
                 "addon `{}` not found in org `{}` — skipping",
@@ -77,6 +80,10 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         }
     }
 
-    info!("delete complete");
+    if failures > 0 {
+        warn!("delete finished with {failures} failure(s); see warnings above");
+    } else {
+        info!("delete complete");
+    }
     Ok(())
 }
