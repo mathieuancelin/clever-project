@@ -51,8 +51,9 @@ pub struct ReadArgs {
 
 #[derive(Debug, Args)]
 pub struct ApplyArgs {
-    /// Project file path (.yaml/.yml/.json)
-    pub file: PathBuf,
+    /// Project file path (.yaml/.yml/.json). If omitted, looks for
+    /// `project.clever.yaml`, `.yml` or `.json` in the current directory.
+    pub file: Option<PathBuf>,
 
     /// Override the organisation defined in the project file
     #[arg(long)]
@@ -91,8 +92,9 @@ pub struct ApplyArgs {
 
 #[derive(Debug, Args)]
 pub struct CheckArgs {
-    /// Project file path (.yaml/.yml/.json)
-    pub file: PathBuf,
+    /// Project file path (.yaml/.yml/.json). If omitted, looks for
+    /// `project.clever.yaml`, `.yml` or `.json` in the current directory.
+    pub file: Option<PathBuf>,
 
     /// Override the organisation defined in the project file
     #[arg(long)]
@@ -129,8 +131,9 @@ pub struct CheckArgs {
 
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
-    /// Project file path (.yaml/.yml/.json)
-    pub file: PathBuf,
+    /// Project file path (.yaml/.yml/.json). If omitted, looks for
+    /// `project.clever.yaml`, `.yml` or `.json` in the current directory.
+    pub file: Option<PathBuf>,
 
     /// Override the organisation defined in the project file
     #[arg(long)]
