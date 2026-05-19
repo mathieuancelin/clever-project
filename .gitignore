@@ -5,3 +5,5 @@ specs.md
 .clever.json
 # project secret files (never commit)
 *.secrets
+# local state cache (per-machine, regenerable)
+*.state
