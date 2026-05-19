@@ -2,6 +2,7 @@
 /ignored
 .DS_Store
 specs.md
+ROADMAP.md
 .clever.json
 # project secret files (never commit)
 *.secrets
