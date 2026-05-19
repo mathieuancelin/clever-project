@@ -2,6 +2,14 @@
 name = "clever-project"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Declare Clever Cloud resources in a YAML/JSON file and sync them via the clever-tools CLI."
+license = "Apache-2.0"
+repository = "https://github.com/mathieuancelin/clever-project"
+homepage = "https://github.com/mathieuancelin/clever-project"
+readme = "README.md"
+keywords = ["clever-cloud", "deploy", "cli", "iac", "infrastructure"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
