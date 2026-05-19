@@ -9,6 +9,7 @@ use serde_yaml::Value;
 use tracing::debug;
 
 use crate::interpolate::Resolver;
+use crate::issues::{self, Issue, IssueSink};
 
 static SECRET_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{secrets\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap());
@@ -250,8 +251,12 @@ impl Project {
 
         let mut project: Project = serde_yaml::from_value(value)
             .with_context(|| format!("deserializing project from `{}`", path.display()))?;
-        validate_and_normalize_app_kinds(&mut project)?;
-        validate_regions(&project)?;
+        let mut issues: Vec<Issue> = Vec::new();
+        validate_and_normalize_app_kinds(&mut project, &mut issues);
+        validate_regions(&project, &mut issues);
+        if !issues.is_empty() {
+            bail!("{}", issues::render(&issues));
+        }
         Ok((project, resolver))
     }
 
@@ -502,48 +507,45 @@ pub fn load_variables_file(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-/// Normalize each app's `kind` (lowercase + `java` → `jar`) and reject any
-/// kind that isn't in `ALLOWED_APP_KINDS`. We do this client-side so users
-/// see a clear error before any `clever` call goes out.
-fn validate_and_normalize_app_kinds(project: &mut Project) -> Result<()> {
+/// Normalize each app's `kind` (lowercase + `java` → `jar`) and record any
+/// kind that isn't in `ALLOWED_APP_KINDS`. The mutation happens regardless so
+/// downstream code sees the canonical form even when the kind is unknown.
+fn validate_and_normalize_app_kinds(project: &mut Project, issues: &mut Vec<Issue>) {
     for (key, app) in project.apps.iter_mut() {
         let normalized = normalize_app_kind(&app.kind);
         if !ALLOWED_APP_KINDS.contains(&normalized.as_str()) {
-            bail!(
+            issues.push_issue(format!(
                 "app `{key}` has unknown kind `{}`. Valid kinds: {} (or `java` as an alias for `jar`)",
                 app.kind,
                 ALLOWED_APP_KINDS.join(", ")
-            );
+            ));
         }
         app.kind = normalized;
     }
-    Ok(())
 }
 
 /// Reject any unknown region — root, per-app, or per-addon.
-fn validate_regions(project: &Project) -> Result<()> {
-    check_region("project root", &project.region)?;
+fn validate_regions(project: &Project, issues: &mut Vec<Issue>) {
+    check_region("project root", &project.region, issues);
     for (key, app) in &project.apps {
         if let Some(r) = &app.region {
-            check_region(&format!("app `{key}`"), r)?;
+            check_region(&format!("app `{key}`"), r, issues);
         }
     }
     for (key, addon) in &project.addons {
         if let Some(r) = &addon.region {
-            check_region(&format!("addon `{key}`"), r)?;
+            check_region(&format!("addon `{key}`"), r, issues);
         }
     }
-    Ok(())
 }
 
-fn check_region(where_: &str, value: &str) -> Result<()> {
+fn check_region(where_: &str, value: &str, issues: &mut Vec<Issue>) {
     if !ALLOWED_REGIONS.contains(&value) {
-        bail!(
+        issues.push_issue(format!(
             "{where_} has unknown region `{value}`. Valid regions: {}",
             ALLOWED_REGIONS.join(", ")
-        );
+        ));
     }
-    Ok(())
 }
 
 fn load_value(path: &Path) -> Result<Value> {
@@ -682,6 +684,20 @@ addons:
         let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("app `a`"));
+        assert!(msg.contains("zzz"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn multiple_load_time_issues_are_all_reported() {
+        // bad root region + bad app kind + bad app region: 3 problems
+        let bad = "name: P\norg: o\nregion: atlantis\napps:\n  a:\n    name: x\n    kind: cobol\n    region: zzz\n";
+        let p = write_tmp("yaml", bad);
+        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("3 validation problems"), "got: {msg}");
+        assert!(msg.contains("atlantis"));
+        assert!(msg.contains("cobol"));
         assert!(msg.contains("zzz"));
         std::fs::remove_file(&p).ok();
     }
