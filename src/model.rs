@@ -183,8 +183,9 @@ impl Project {
     }
 
     /// Load the project file, run variable interpolation, and return both the
-    /// resolved project and the resolver (the latter can be useful if a caller
-    /// later needs to expand additional strings).
+    /// resolved project and the resolver. Fails fast — all accumulated soft
+    /// issues (missing vars/secrets, unknown kinds/regions, etc.) are
+    /// rendered as a single error.
     pub fn load_and_resolve(
         path: &Path,
         org_override: Option<String>,
@@ -192,72 +193,30 @@ impl Project {
         cli_vars: &[(String, String)],
         secrets_path: Option<&Path>,
     ) -> Result<(Self, Resolver)> {
-        let mut value = load_value(path)?;
-        let map = value
-            .as_mapping_mut()
-            .ok_or_else(|| anyhow!("project file root must be a mapping"))?;
-
-        let org = match org_override {
-            Some(v) => v,
-            None => map
-                .get(Value::String("org".into()))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| anyhow!("missing `org` at project root (and no --org override)"))?,
-        };
-        let region = match region_override {
-            Some(v) => v,
-            None => map
-                .get(Value::String("region".into()))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    anyhow!("missing `region` at project root (and no --region override)")
-                })?,
-        };
-
-        let effective_env = cli_vars
-            .iter()
-            .rev()
-            .find(|(k, _)| k == "env")
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| "prod".to_string());
-
-        let secrets = load_secrets(path, &effective_env, secrets_path)?;
-
-        let raw_variables = map
-            .remove(Value::String("variables".into()))
-            .unwrap_or(Value::Null);
-        let file_vars = parse_variables(&raw_variables, &effective_env)?;
-        // Allow `${secrets.X}` inside variable values.
-        let file_vars = expand_secrets(file_vars, &secrets)?;
-
-        // Build the merged map: file vars first, then secrets exposed under
-        // their `secrets.<key>` namespace. Resolver::build will layer
-        // cli_vars on top and add env/org/region.
-        let mut combined = file_vars;
-        for (k, v) in &secrets {
-            combined.insert(format!("secrets.{k}"), v.clone());
-        }
-        let resolver = Resolver::build(&combined, cli_vars, org.clone(), region.clone())?;
-
-        // Apply CLI overrides into the value tree so the deserialized Project
-        // reflects them. The `variables` section was removed earlier — the
-        // resolver carries the merged values now.
-        map.insert(Value::String("org".into()), Value::String(org));
-        map.insert(Value::String("region".into()), Value::String(region));
-
-        resolver.resolve_value(&mut value)?;
-
-        let mut project: Project = serde_yaml::from_value(value)
-            .with_context(|| format!("deserializing project from `{}`", path.display()))?;
-        let mut issues: Vec<Issue> = Vec::new();
-        validate_and_normalize_app_kinds(&mut project, &mut issues);
-        validate_regions(&project, &mut issues);
+        let (project, resolver, issues) =
+            load_inner(path, org_override, region_override, cli_vars, secrets_path)?;
         if !issues.is_empty() {
             bail!("{}", issues::render(&issues));
         }
         Ok((project, resolver))
+    }
+
+    /// Like `load_and_resolve` but does not bail on soft issues. Returns the
+    /// (partially resolved) project plus every accumulated issue, so callers
+    /// like `check` can run further cross-resource validators on top before
+    /// rendering one combined report. Still returns `Err` for fatal failures
+    /// that prevent producing a `Project` at all (I/O, syntax, missing
+    /// `org`/`region`, mixed variables shape, reserved variable name).
+    pub fn load_collecting(
+        path: &Path,
+        org_override: Option<String>,
+        region_override: Option<String>,
+        cli_vars: &[(String, String)],
+        secrets_path: Option<&Path>,
+    ) -> Result<(Self, Vec<Issue>)> {
+        let (project, _resolver, issues) =
+            load_inner(path, org_override, region_override, cli_vars, secrets_path)?;
+        Ok((project, issues))
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -269,6 +228,85 @@ impl Project {
             .with_context(|| format!("writing project file `{}`", path.display()))?;
         Ok(())
     }
+}
+
+/// Shared loading pipeline: parse the file, build the resolver, interpolate,
+/// deserialize, run the model-level validators. Soft issues (missing
+/// variables, unknown kinds/regions, ...) are collected into the returned
+/// `Vec<Issue>`; only truly fatal failures (I/O, syntax, mixed-shape
+/// variables, missing `org`/`region`) return `Err`.
+fn load_inner(
+    path: &Path,
+    org_override: Option<String>,
+    region_override: Option<String>,
+    cli_vars: &[(String, String)],
+    secrets_path: Option<&Path>,
+) -> Result<(Project, Resolver, Vec<Issue>)> {
+    let mut issues: Vec<Issue> = Vec::new();
+
+    let mut value = load_value(path)?;
+    let map = value
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("project file root must be a mapping"))?;
+
+    let org = match org_override {
+        Some(v) => v,
+        None => map
+            .get(Value::String("org".into()))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("missing `org` at project root (and no --org override)"))?,
+    };
+    let region = match region_override {
+        Some(v) => v,
+        None => map
+            .get(Value::String("region".into()))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow!("missing `region` at project root (and no --region override)")
+            })?,
+    };
+
+    let effective_env = cli_vars
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "env")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "prod".to_string());
+
+    let secrets = load_secrets(path, &effective_env, secrets_path)?;
+
+    let raw_variables = map
+        .remove(Value::String("variables".into()))
+        .unwrap_or(Value::Null);
+    let file_vars = parse_variables(&raw_variables, &effective_env)?;
+    // Allow `${secrets.X}` inside variable values. Missing secrets become
+    // empty strings and an issue.
+    let file_vars = expand_secrets(file_vars, &secrets, &mut issues);
+
+    // Build the merged map: file vars first, then secrets exposed under
+    // their `secrets.<key>` namespace. Resolver::build will layer
+    // cli_vars on top and add env/org/region.
+    let mut combined = file_vars;
+    for (k, v) in &secrets {
+        combined.insert(format!("secrets.{k}"), v.clone());
+    }
+    let resolver = Resolver::build(&combined, cli_vars, org.clone(), region.clone())?;
+
+    // Apply CLI overrides into the value tree so the deserialized Project
+    // reflects them. The `variables` section was removed earlier — the
+    // resolver carries the merged values now.
+    map.insert(Value::String("org".into()), Value::String(org));
+    map.insert(Value::String("region".into()), Value::String(region));
+
+    resolver.resolve_value(&mut value, &mut issues);
+
+    let mut project: Project = serde_yaml::from_value(value)
+        .with_context(|| format!("deserializing project from `{}`", path.display()))?;
+    validate_and_normalize_app_kinds(&mut project, &mut issues);
+    validate_regions(&project, &mut issues);
+    Ok((project, resolver, issues))
 }
 
 /// Parse the project file's `variables` section. Two shapes are accepted:
@@ -444,32 +482,30 @@ fn parse_yaml_or_json(raw: &str) -> Result<Value> {
 /// Expand `${secrets.X}` references inside the values of the project's
 /// variables section, before they're handed to the resolver. References to
 /// other variables (`${foo}`) are left untouched here — they're handled by
-/// the resolver during the value-tree walk.
+/// the resolver during the value-tree walk. Missing secrets are recorded in
+/// `issues` and replaced by empty so resolution can continue.
 fn expand_secrets(
     vars: IndexMap<String, String>,
     secrets: &IndexMap<String, String>,
-) -> Result<IndexMap<String, String>> {
+    issues: &mut Vec<Issue>,
+) -> IndexMap<String, String> {
     let mut out = IndexMap::with_capacity(vars.len());
     for (k, v) in vars {
-        let mut missing: Option<String> = None;
         let resolved = SECRET_RE.replace_all(&v, |caps: &regex::Captures| {
             let name = &caps[1];
             match secrets.get(name) {
                 Some(val) => val.clone(),
                 None => {
-                    if missing.is_none() {
-                        missing = Some(name.to_string());
-                    }
+                    issues.push_issue(format!(
+                        "undefined secret `{name}` referenced in variable `{k}`"
+                    ));
                     String::new()
                 }
             }
         });
-        if let Some(name) = missing {
-            bail!("undefined secret `{name}` referenced in variable `{k}`");
-        }
         out.insert(k, resolved.into_owned());
     }
-    Ok(out)
+    out
 }
 
 /// Load a `--variable-path FILE` as a flat list of `(key, value)` pairs.
