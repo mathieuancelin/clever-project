@@ -67,6 +67,12 @@ pub struct ApplyArgs {
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
 
+    /// Explicit path to a secrets file. When omitted, secrets are
+    /// auto-discovered next to the project file (`<stem>.secrets` and
+    /// `<stem>.<env>.secrets`).
+    #[arg(long)]
+    pub secrets_path: Option<PathBuf>,
+
     /// Plan only: read current state and log what would change without
     /// mutating anything on Clever Cloud.
     #[arg(long)]
@@ -93,6 +99,12 @@ pub struct DeleteArgs {
     /// Set a variable (key=value). Overrides values from the project file.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
+
+    /// Explicit path to a secrets file. When omitted, secrets are
+    /// auto-discovered next to the project file (`<stem>.secrets` and
+    /// `<stem>.<env>.secrets`).
+    #[arg(long)]
+    pub secrets_path: Option<PathBuf>,
 
     /// Plan only: log what would be deleted without mutating anything.
     #[arg(long)]
