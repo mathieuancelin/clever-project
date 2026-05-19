@@ -6,7 +6,7 @@ variables:
   common:
     domain: foo.bar
   prod: 
-    apikey: secret_for_prod
+    apikey: ${secrets.apikey}
   dev:
     apikey: secret_for_dev
 apps:
