@@ -29,6 +29,7 @@ pub fn resolve_project_file(explicit: Option<PathBuf>, search_dir: &Path) -> Res
     const CANDIDATES: &[&str] = &[
         "project.clever.yaml",
         "project.clever.yml",
+        "project.clever.toml",
         "project.clever.json",
     ];
     for name in CANDIDATES {
@@ -149,6 +150,25 @@ mod tests {
         std::fs::write(dir.join("project.clever.yml"), "name: x").unwrap();
         let p = resolve_project_file(None, &dir).unwrap();
         assert_eq!(p.file_name().unwrap(), "project.clever.yml");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn falls_back_to_toml() {
+        let dir = fresh_tmp_dir();
+        std::fs::write(dir.join("project.clever.toml"), "name = \"x\"").unwrap();
+        let p = resolve_project_file(None, &dir).unwrap();
+        assert_eq!(p.file_name().unwrap(), "project.clever.toml");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn toml_preferred_over_json_when_both_present() {
+        let dir = fresh_tmp_dir();
+        std::fs::write(dir.join("project.clever.toml"), "name = \"x\"").unwrap();
+        std::fs::write(dir.join("project.clever.json"), "{}").unwrap();
+        let p = resolve_project_file(None, &dir).unwrap();
+        assert_eq!(p.file_name().unwrap(), "project.clever.toml");
         std::fs::remove_dir_all(&dir).ok();
     }
 
