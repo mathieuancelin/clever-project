@@ -6,6 +6,7 @@ Declare your Clever Cloud resources in a YAML or JSON file and sync them with a 
 clever-project apply project.yaml --env prod
 clever-project delete project.yaml --env staging --dry-run
 clever-project read --org orga_xxx --all -o project.yaml
+clever-project check project.yaml --offline
 ```
 
 ## Prerequisites
@@ -138,6 +139,33 @@ clever-project delete <FILE> [OPTIONS]
 ```
 
 Same flags as `apply` (minus `--region`).
+
+### `check`
+
+Validate a project file without contacting Clever Cloud for any mutation. Useful in pre-commit hooks and CI.
+
+```
+clever-project check <FILE> [OPTIONS]
+```
+
+Runs, in order:
+
+1. **YAML/JSON syntax** and project schema parsing.
+2. **Variable interpolation** — every `${...}` reference must resolve. Catches typos, missing entries in `variables:`, `--variable-path`, `--variable`, or in the active `.secrets` file.
+3. **App `kind`** — must be one of the supported types (case-insensitive, `java` alias accepted).
+4. **Region** — root, per-app, per-addon, plus `--region` override.
+5. **Dependencies** — every `dependencies:` entry must be a project key under `apps:` or `addons:`; self-dependencies are rejected.
+6. **Name uniqueness** — two apps (or two addons) can't resolve to the same `name`. App-vs-addon name collisions are allowed.
+7. **Addon catalog (live API)** — addon `kind`, `size`, and per-addon `region` are checked against the live `clever curl /v2/products/addonproviders`.
+8. **App flavor catalog (live API)** — `scalability.instances.minSize` / `maxSize` are checked against `clever curl /v2/products/instances`.
+
+Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variable-path`, `--secrets-path`). Plus:
+
+| Flag | Description |
+|---|---|
+| `--offline` | Skip steps 7 and 8 (live API). Static validation still runs. Useful when no `clever login` is available. |
+
+Exit code: 0 on success, non-zero on first detected issue.
 
 ### `read`
 
