@@ -94,7 +94,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     // diff against the project file, and print the result. Always printed,
     // so the user (and `--dry-run`) see exactly what apply will do before
     // it touches anything.
-    let live = live_snapshot(&clever, &project.org)
+    let live = live_snapshot(&clever, &project.org, &project)
         .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
     let plan = plan_mod::compute(&project, &live, &targets);
     print!("{}", plan_mod::render(&plan, &project, &targets));
