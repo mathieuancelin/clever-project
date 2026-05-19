@@ -73,10 +73,7 @@ impl Clever {
                 stdout.trim()
             );
         }
-        debug!(
-            "stdout: {}",
-            String::from_utf8_lossy(&output.stdout).trim()
-        );
+        debug!("stdout: {}", String::from_utf8_lossy(&output.stdout).trim());
         Ok(output.stdout)
     }
 
@@ -89,8 +86,8 @@ impl Clever {
             applications: Vec<ListedApp>,
         }
         let json = self.run_json(&["applications", "list", "--format", "json", "--org", org])?;
-        let wrappers: Vec<OrgWrapper> = serde_json::from_value(json)
-            .context("decoding `applications list` output")?;
+        let wrappers: Vec<OrgWrapper> =
+            serde_json::from_value(json).context("decoding `applications list` output")?;
         Ok(wrappers.into_iter().flat_map(|w| w.applications).collect())
     }
 
@@ -257,7 +254,11 @@ impl Clever {
             .collect();
         let body = serde_json::to_vec(&payload).context("serializing env payload")?;
 
-        info!("clever env import --app {} --json (replace, {} vars)", app, env.len());
+        info!(
+            "clever env import --app {} --json (replace, {} vars)",
+            app,
+            env.len()
+        );
         let mut child = Command::new(&self.program)
             .args(["env", "import", "--app", app, "--json"])
             .stdin(Stdio::piped())
@@ -271,7 +272,9 @@ impl Clever {
             .ok_or_else(|| anyhow!("no stdin handle on `clever env import`"))?
             .write_all(&body)
             .context("writing env payload to `clever env import` stdin")?;
-        let output = child.wait_with_output().context("waiting for `clever env import`")?;
+        let output = child
+            .wait_with_output()
+            .context("waiting for `clever env import`")?;
         if !output.status.success() {
             bail!(
                 "`clever env import` failed (status {}):\nstderr: {}",
@@ -306,18 +309,17 @@ impl Clever {
             );
             return Ok(());
         }
-        let mut args: Vec<String> = vec![
-            "scale".into(),
-            "--app".into(),
-            app.into(),
-        ];
+        let mut args: Vec<String> = vec!["scale".into(), "--app".into(), app.into()];
         let inst = scalability.instances.as_ref();
         if scalability.auto {
             if let Some(n) = inst.and_then(|i| i.min_number) {
                 args.push("--min-instances".into());
                 args.push(n.to_string());
             }
-            if let Some(n) = inst.and_then(|i| i.max_number).or_else(|| inst.and_then(|i| i.min_number)) {
+            if let Some(n) = inst
+                .and_then(|i| i.max_number)
+                .or_else(|| inst.and_then(|i| i.min_number))
+            {
                 args.push("--max-instances".into());
                 args.push(n.to_string());
             }
