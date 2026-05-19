@@ -700,6 +700,90 @@ You shouldn't need to delete `<project>.state` by hand — but you can, and the 
 
 The default `.gitignore` excludes `*.state` — it's a per-machine cache.
 
+## Machine-readable output (`--format json`)
+
+Every command accepts `--format json`. The CLI then emits a single JSON document on **stdout**; tracing logs are routed to **stderr** so piping into `jq` (or capturing for CI) stays clean:
+
+```sh
+clever-project check --offline --format json | jq '.ok'
+clever-project status --format json | jq '.summary'
+clever-project apply --dry-run --format json | jq '.summary.to_create'
+```
+
+JSON mode is non-interactive: `apply` and `delete` require `--yes` (no prompt), and `init` implies `--non-interactive` (every required field must come from a flag). Exit codes still mean what they did in text mode — `check` exits 1 on validation failure, `apply`/`delete` exit non-zero on abort or error.
+
+### Sample shapes
+
+**`check --format json`**
+```json
+{
+  "ok": false,
+  "project": "demo",
+  "org": "orga_xxx",
+  "apps": 1,
+  "addons": 0,
+  "network_groups": 0,
+  "issues": ["app `api` has unknown kind `cobol`. …"]
+}
+```
+
+**`status --format json`**
+```json
+{
+  "project": "demo",
+  "org": "orga_xxx",
+  "region": "par",
+  "summary": { "synced": 1, "drifted": 1, "to_create": 1, "orphan": 0 },
+  "apps": [
+    { "name": "prod-api", "tag": "drifted", "diffs": [
+      { "field": "env", "body": { "kind": "map", "entries": [
+        { "op": "~", "key": "PORT", "file": "3000", "live": "8080" }
+      ]}}
+    ]}
+  ],
+  "addons": [],
+  "network_groups": []
+}
+```
+
+**`apply --dry-run --format json`** (same shape as the structured plan, just JSON)
+```json
+{
+  "project": "demo",
+  "org": "orga_xxx",
+  "region": "par",
+  "summary": { "to_create": 1, "to_update": 0, "unchanged": 1 },
+  "apps": [
+    {
+      "name": "prod-api",
+      "op": "create",
+      "kind": "node",
+      "region": "par",
+      "source": "https://github.com/me/api.git",
+      "env": { "PORT": "8080" },
+      "domains": ["api.example.com"],
+      "dependencies": ["prod-db"]
+    }
+  ],
+  "addons": [],
+  "network_groups": []
+}
+```
+
+**`delete --format json`**
+```json
+{
+  "project": "demo",
+  "org": "orga_xxx",
+  "summary": { "to_destroy": 2 },
+  "network_groups": [],
+  "apps": ["prod-api"],
+  "addons": ["prod-db"]
+}
+```
+
+**`read --format json`** and **`init --format json`** emit a small post-action report listing the file written and the resources captured.
+
 ## Behaviour notes / limitations
 
 - **Source code push is not handled.** GitHub sources get `clever create --github owner/repo`; for non-GitHub sources the app is created empty and you deploy via Clever's git remote yourself.
