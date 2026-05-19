@@ -11,7 +11,14 @@ use crate::model::Project;
 /// inside the target organisation. Apps are deleted first so any service
 /// links from app → addon are released before we touch the addons.
 pub fn run(args: DeleteArgs) -> Result<()> {
-    let mut variables = args.variables;
+    let mut variables: Vec<(String, String)> = Vec::new();
+    for path in &args.variable_paths {
+        variables.extend(
+            crate::model::load_variables_file(path)
+                .with_context(|| format!("loading --variable-path `{}`", path.display()))?,
+        );
+    }
+    variables.extend(args.variables);
     if let Some(env) = args.env {
         variables.push(("env".to_string(), env));
     }
