@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, anyhow, bail};
 use tracing::{info, warn};
 
-use crate::clever::{AddonProvider, Clever, CreateAddon, CreateApp, ListedAddon, ListedApp};
+use crate::clever::{
+    AddonProvider, AppInstance, Clever, CreateAddon, CreateApp, ListedAddon, ListedApp,
+};
 use crate::cli::ApplyArgs;
 use crate::commands::OrgCache;
 use crate::model::{Addon, App, Project, Source};
@@ -49,6 +51,25 @@ pub fn run(args: ApplyArgs) -> Result<()> {
             )
         })?;
         validate_addons(&mut project.addons, &providers)?;
+    }
+
+    // Validate app scaling sizes against the live instance catalog. Only
+    // fired when at least one app declares an explicit flavor — bare-kind
+    // validation already happened at load time.
+    if project.apps.values().any(|a| {
+        a.scalability
+            .as_ref()
+            .and_then(|s| s.instances.as_ref())
+            .is_some_and(|i| i.min_size.is_some() || i.max_size.is_some())
+    }) {
+        info!("validating app scaling sizes against Clever's instance catalog");
+        let instances = clever.list_app_instances(&project.org).with_context(|| {
+            format!(
+                "fetching app instances for org `{}` (used to validate app scaling sizes)",
+                project.org
+            )
+        })?;
+        validate_app_scaling(&mut project.apps, &instances)?;
     }
 
     let mut state = State::load(&args.file)?;
@@ -711,6 +732,77 @@ fn sync_dependencies(
     Ok(changed)
 }
 
+/// Validate (and case-normalize) every app's `scalability.instances.min_size`
+/// and `max_size` against the live flavor catalog for that app's `kind`. The
+/// kind itself is matched against `instance.variant.slug` (after our load-time
+/// normalization, `kind` is already lowercased and `java`→`jar`).
+fn validate_app_scaling(apps: &mut IndexMap<String, App>, instances: &[AppInstance]) -> Result<()> {
+    use std::collections::HashMap;
+    let by_slug: HashMap<&str, &AppInstance> = instances
+        .iter()
+        .map(|i| (i.variant.slug.as_str(), i))
+        .collect();
+
+    for (key, app) in apps.iter_mut() {
+        let instance = match by_slug.get(app.kind.as_str()) {
+            Some(i) => *i,
+            None => {
+                let mut available: Vec<&str> =
+                    instances.iter().map(|i| i.variant.slug.as_str()).collect();
+                available.sort();
+                available.dedup();
+                bail!(
+                    "app `{key}` has unknown kind `{}` (not in Clever's instance catalog). Known kinds: {}",
+                    app.kind,
+                    available.join(", ")
+                );
+            }
+        };
+
+        let Some(scale) = app.scalability.as_mut() else {
+            continue;
+        };
+        let Some(ins) = scale.instances.as_mut() else {
+            continue;
+        };
+
+        normalize_flavor(&mut ins.min_size, key, &app.kind, instance)?;
+        normalize_flavor(&mut ins.max_size, key, &app.kind, instance)?;
+    }
+    Ok(())
+}
+
+fn normalize_flavor(
+    size: &mut Option<String>,
+    key: &str,
+    kind: &str,
+    instance: &AppInstance,
+) -> Result<()> {
+    let Some(value) = size.as_mut() else {
+        return Ok(());
+    };
+    let needle = value.to_lowercase();
+    let matched = instance
+        .flavors
+        .iter()
+        .find(|f| f.name.to_lowercase() == needle);
+    match matched {
+        Some(flavor) => {
+            if flavor.name != *value {
+                *value = flavor.name.clone();
+            }
+            Ok(())
+        }
+        None => {
+            let available: Vec<&str> = instance.flavors.iter().map(|f| f.name.as_str()).collect();
+            bail!(
+                "app `{key}` size `{value}` is not a valid flavor for kind `{kind}`. Available sizes: {}",
+                available.join(", ")
+            );
+        }
+    }
+}
+
 /// Validate every addon's `kind` and `size` against the live provider list
 /// returned by Clever's API. Normalizes the size casing to match the canonical
 /// slug from the API (so users can write `S_BIG` and we send `s_big`, etc.).
@@ -848,7 +940,8 @@ mod tests {
         assert!(!kinds_match("node", "java"));
     }
 
-    use crate::clever::{AddonPlan, AddonProvider};
+    use crate::clever::{AddonPlan, AddonProvider, AppFlavor, AppInstance, AppInstanceVariant};
+    use crate::model::{Instances, Scalability};
     use indexmap::IndexMap;
 
     fn pg_provider() -> AddonProvider {
@@ -947,6 +1040,114 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("syd"));
         assert!(msg.contains("Supported regions"));
+    }
+
+    fn node_instance() -> AppInstance {
+        AppInstance {
+            type_: "node".to_string(),
+            variant: AppInstanceVariant {
+                slug: "node".to_string(),
+                name: "Node.js".to_string(),
+            },
+            flavors: vec![
+                AppFlavor {
+                    name: "XS".to_string(),
+                },
+                AppFlavor {
+                    name: "S".to_string(),
+                },
+                AppFlavor {
+                    name: "M".to_string(),
+                },
+                AppFlavor {
+                    name: "nano".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn app_with_scaling(kind: &str, min: Option<&str>, max: Option<&str>) -> App {
+        App {
+            name: format!("{kind}-app"),
+            kind: kind.to_string(),
+            region: None,
+            source: None,
+            domains: vec![],
+            scalability: Some(Scalability {
+                auto: false,
+                instances: Some(Instances {
+                    min_number: None,
+                    max_number: None,
+                    min_size: min.map(str::to_string),
+                    max_size: max.map(str::to_string),
+                }),
+            }),
+            dependencies: vec![],
+            config: IndexMap::new(),
+            env: IndexMap::new(),
+        }
+    }
+
+    #[test]
+    fn validate_app_scaling_unknown_kind() {
+        let instances = vec![node_instance()];
+        let mut apps = IndexMap::new();
+        apps.insert("a".to_string(), app_with_scaling("cobol", Some("S"), None));
+        let err = validate_app_scaling(&mut apps, &instances).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cobol"));
+        assert!(msg.contains("Known kinds"));
+        assert!(msg.contains("node"));
+    }
+
+    #[test]
+    fn validate_app_scaling_unknown_size() {
+        let instances = vec![node_instance()];
+        let mut apps = IndexMap::new();
+        apps.insert(
+            "a".to_string(),
+            app_with_scaling("node", Some("HUGE"), None),
+        );
+        let err = validate_app_scaling(&mut apps, &instances).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("HUGE"));
+        assert!(msg.contains("Available sizes"));
+    }
+
+    #[test]
+    fn validate_app_scaling_normalises_size_casing() {
+        let instances = vec![node_instance()];
+        let mut apps = IndexMap::new();
+        apps.insert(
+            "a".to_string(),
+            app_with_scaling("node", Some("s"), Some("m")),
+        );
+        validate_app_scaling(&mut apps, &instances).unwrap();
+        let scale = apps.get("a").unwrap().scalability.as_ref().unwrap();
+        let ins = scale.instances.as_ref().unwrap();
+        assert_eq!(ins.min_size.as_deref(), Some("S"));
+        assert_eq!(ins.max_size.as_deref(), Some("M"));
+    }
+
+    #[test]
+    fn validate_app_scaling_skips_apps_without_scaling() {
+        let instances = vec![node_instance()];
+        let mut apps = IndexMap::new();
+        apps.insert(
+            "a".to_string(),
+            App {
+                name: "a".to_string(),
+                kind: "node".to_string(),
+                region: None,
+                source: None,
+                domains: vec![],
+                scalability: None,
+                dependencies: vec![],
+                config: IndexMap::new(),
+                env: IndexMap::new(),
+            },
+        );
+        validate_app_scaling(&mut apps, &instances).unwrap();
     }
 
     #[test]
