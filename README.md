@@ -168,7 +168,7 @@ variables: { ... }     # see Variables
 apps:
   <key>:
     name: <clever app name>            # required; usually templated with ${env}
-    kind: node                         # clever instance type (node, jar, python, ...)
+    kind: node                         # clever instance type — see the list below
     region: par                        # optional; defaults to project region
     source:                            # optional
       from: https://github.com/owner/repo.git
@@ -195,8 +195,8 @@ addons:
 ```
 
 - Resource references inside `dependencies:` use the **project keys** (`db`, `api`, etc.), not Clever names or ids.
+- App `kind:` must be one of: `docker`, `dotnet`, `elixir`, `frankenphp`, `go`, `gradle`, `haskell`, `jar`, `linux`, `maven`, `meteor`, `node`, `php`, `play1`, `play2`, `python`, `ruby`, `rust`, `sbt`, `static`, `static-apache`, `v`, `war`. Values are matched case-insensitively, and `java` is accepted as an alias for `jar`. Anything else is rejected at load time with the full list.
 - Addon `kind:` accepts the short form (`postgresql`, `redis`, `cellar`, `matomo`, ...) and is mapped to the right Clever provider id (`postgresql-addon`, `redis-addon`, `cellar-addon`, `addon-matomo`, ...). Unknown values pass through unchanged.
-- Java apps: Clever lists them with `type: jar`, but `kind: java` in the project file is accepted too — they're treated as equivalent on update.
 
 ## Variables
 
@@ -361,7 +361,6 @@ The default `.gitignore` excludes `*.state` — it's a per-machine cache.
 - **`clever config`** isn't supported — `clever-tools` doesn't expose it as JSON. The `config:` field is parsed but ignored on both `read` and `apply`.
 - **`scalability` on `read`** isn't populated — `clever scale` has no read mode. You'll need to add it manually if you read-bootstrap a project.
 - **`apply` is sequential** and stops at the first error (except on `delete`, which is best-effort and continues).
-- **Java apps**: Clever reports them as `type: jar`, but `kind: java` in the project file is accepted (treated as equivalent).
 - **Verbose logging**: pass `-v` / `--verbose` to see the underlying `clever` commands and per-step state lookups.
 
 ## Build & test
