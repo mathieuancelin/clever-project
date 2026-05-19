@@ -99,6 +99,14 @@ Options:
 
 Apps with a GitHub `source.from` are created with `clever create --github owner/repo`. Non-GitHub sources create an empty app — push your code to the Clever remote yourself afterwards.
 
+**Restarts.** At the end of an `apply`, the CLI calls `clever restart --app <id> --quiet` for each app that needs it:
+
+- newly created from a GitHub source (kicks off the first deployment),
+- existing app whose `env` was changed during the run,
+- existing app whose linked services (`dependencies`) were changed.
+
+Newly created apps *without* a GitHub source are not restarted (no code to deploy yet — push to the Clever remote yourself). Domain or scalability changes alone don't trigger a restart.
+
 ### `delete`
 
 Delete the resources listed in the project file. Apps are removed before addons so service links are released first. Anything that's already gone is skipped with a warning — `delete` is best-effort.
