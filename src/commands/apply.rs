@@ -8,7 +8,14 @@ use crate::clever::{Clever, CreateAddon, CreateApp, ListedAddon, ListedApp};
 use crate::model::{App, Project, Source};
 
 pub fn run(args: ApplyArgs) -> Result<()> {
-    let mut variables = args.variables;
+    let mut variables: Vec<(String, String)> = Vec::new();
+    for path in &args.variable_paths {
+        variables.extend(
+            crate::model::load_variables_file(path)
+                .with_context(|| format!("loading --variable-path `{}`", path.display()))?,
+        );
+    }
+    variables.extend(args.variables);
     if let Some(env) = args.env {
         variables.push(("env".to_string(), env));
     }
