@@ -24,6 +24,9 @@ pub enum Command {
     /// Validate a project file (syntax, variables, dependencies, sizing,
     /// kinds, regions). Doesn't modify anything.
     Check(CheckArgs),
+    /// Compare a project file against the live Clever Cloud org and report
+    /// any drift. Read-only; doesn't modify anything.
+    Status(StatusArgs),
 }
 
 #[derive(Debug, Args)]
@@ -127,6 +130,47 @@ pub struct CheckArgs {
     /// uniqueness) is always performed.
     #[arg(long)]
     pub offline: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Project file path (.yaml/.yml/.json). If omitted, looks for
+    /// `project.clever.yaml`, `.yml` or `.json` in the current directory.
+    pub file: Option<PathBuf>,
+
+    /// Override the organisation defined in the project file
+    #[arg(long)]
+    pub org: Option<String>,
+
+    /// Override the default region defined in the project file
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// Value for the special variable `${env}` (default `prod`)
+    #[arg(long)]
+    pub env: Option<String>,
+
+    /// Set a variable (key=value). Overrides values from the project file
+    /// and from --variable-path.
+    #[arg(long = "variable", value_parser = parse_kv)]
+    pub variables: Vec<(String, String)>,
+
+    /// Load variable overrides from a YAML/JSON file (repeatable).
+    #[arg(long = "variable-path")]
+    pub variable_paths: Vec<PathBuf>,
+
+    /// Explicit path to a secrets file.
+    #[arg(long)]
+    pub secrets_path: Option<PathBuf>,
+
+    /// Hide resources that are perfectly in sync; only show drift.
+    #[arg(long)]
+    pub brief: bool,
+
+    /// Exit with code 1 if any drift, orphan, or pending creation is found.
+    /// Useful in CI checks.
+    #[arg(long)]
+    pub exit_on_drift: bool,
 }
 
 #[derive(Debug, Args)]
