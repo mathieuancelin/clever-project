@@ -69,8 +69,19 @@ pub struct Project {
     pub apps: IndexMap<String, App>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub addons: IndexMap<String, Addon>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub network_groups: IndexMap<String, NetworkGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkGroup {
+    pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_groups: Option<serde_yaml::Value>,
+    pub description: Option<String>,
+    /// Project keys (in `apps:` or `addons:`) of the resources to attach to
+    /// this network group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
