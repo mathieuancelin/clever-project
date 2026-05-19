@@ -3,6 +3,7 @@
 Declare your [Clever Cloud](https://www.clever.cloud/) resources in a YAML or JSON file and sync them with a single command. `clever-project` reads the project file and drives the official `clever-tools` CLI to create, update or delete the corresponding apps and addons.
 
 ```sh
+clever-project init
 clever-project apply project.yaml --env prod
 clever-project delete project.yaml --env staging --dry-run
 clever-project read --org orga_xxx --all -o project.yaml
@@ -112,6 +113,61 @@ clever-project delete --env staging
 3. `project.clever.json`
 
 If none exists, the run aborts with a clear error pointing you at the missing descriptor. Naming your file `project.clever.yaml` and running `clever-project apply --env prod` (no path) is the recommended workflow.
+
+### `init`
+
+Scaffold a fresh `project.clever.yaml` interactively. Useful for getting started from zero — the generated file passes `check --offline` immediately, and contains the canonical `${env}`-templated names so you can `apply --env prod` (or `--env dev`) right away.
+
+```
+clever-project init [OPTIONS]
+```
+
+Run with no arguments to be prompted for everything:
+
+```
+$ clever-project init
+Project name: my-stack
+Org id (orga_...): orga_xxxxxxxx
+Region [par]:
+App kind [node]:
+GitHub source? [y/N]: y
+  owner/repo or full URL: me/my-app
+Addons (comma-separated, empty for none): postgresql, redis
+```
+
+Or pass everything via flags (great for templates and CI bootstrapping):
+
+```sh
+clever-project init \
+  --non-interactive \
+  --name my-stack \
+  --org orga_xxxxxxxx \
+  --kind node \
+  --source me/my-app \
+  --addon postgresql --addon redis \
+  -o project.clever.yaml
+```
+
+| Flag | Description |
+|---|---|
+| `--name <NAME>` | Project name (free-form). |
+| `--org <ID>` | Clever Cloud organisation id (`orga_xxx`). |
+| `--region <REGION>` | Default region. Defaults to `par`. |
+| `--kind <KIND>` | App kind (`node`, `docker`, `python`, `jar`, ...). |
+| `--source <REPO>` | GitHub source: `owner/repo`, `github.com/owner/repo`, or a full URL. |
+| `--no-source` | Explicitly create the project with no source (also `--non-interactive`'s default). |
+| `--addon <KIND>` | Provision an addon alongside the app (repeatable). |
+| `-o, --output <FILE>` | Output path. Default `project.clever.yaml`. |
+| `--non-interactive` | Don't prompt; fail if a required field wasn't passed. |
+| `--force` | Overwrite an existing output file. |
+
+Behaviour notes:
+
+- Inputs are validated as you type — invalid `kind` or `region` re-prompts with the list of valid values.
+- `owner/repo` shorthand for GitHub sources is normalized to `https://github.com/owner/repo.git`. SSH (`git@…`) and non-GitHub URLs pass through unchanged.
+- Project keys are slugified from the project name (`"My Stack"` → `my-stack`), and addons are wired in as dependencies of the app automatically.
+- Addon sizes are left unset on purpose — Clever picks its default plan, and you can pin `size:` after reviewing.
+- The output refuses to overwrite an existing file unless `--force` is given.
 
 ### `apply`
 
