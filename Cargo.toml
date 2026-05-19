@@ -1,6 +1,6 @@
 [package]
 name = "clever-project"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.85"
 description = "Declare Clever Cloud resources in a YAML/JSON file and sync them via the clever-tools CLI."
