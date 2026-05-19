@@ -1,6 +1,23 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[value(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// Human-readable output (the default). Logs go to stderr.
+    #[default]
+    Text,
+    /// Single JSON document on stdout — pipes cleanly into `jq` and CI. Logs
+    /// still go to stderr.
+    Json,
+}
+
+impl OutputFormat {
+    pub fn is_json(self) -> bool {
+        matches!(self, OutputFormat::Json)
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "clever-project", version, about = "Sync a project description with Clever Cloud", long_about = None)]
@@ -50,9 +67,14 @@ pub struct ReadArgs {
     #[arg(long, conflicts_with_all = ["apps", "addons"])]
     pub all: bool,
 
-    /// Output file path (.yaml/.yml/.json)
+    /// Output file path (.yaml/.yml/.json/.toml)
     #[arg(short = 'o', long)]
     pub output: PathBuf,
+
+    /// Output format for the CLI's own log messages: human-readable text
+    /// (the default) or a single JSON document on stdout.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -106,6 +128,10 @@ pub struct ApplyArgs {
     /// whole project is processed (the default).
     #[arg(long = "target", value_parser = crate::commands::targets::parse_target_arg)]
     pub targets: Vec<(crate::commands::targets::TargetKind, String)>,
+
+    /// Output format: `text` (default) or `json`.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -145,6 +171,10 @@ pub struct CheckArgs {
     /// uniqueness) is always performed.
     #[arg(long)]
     pub offline: bool,
+
+    /// Output format: `text` (default) or `json`.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -186,6 +216,10 @@ pub struct StatusArgs {
     /// Useful in CI checks.
     #[arg(long)]
     pub exit_on_drift: bool,
+
+    /// Output format: `text` (default) or `json`.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -236,6 +270,10 @@ pub struct DeleteArgs {
     /// `--target` (`apps.KEY`, `addons.KEY`, `network_groups.KEY`, ...).
     #[arg(long = "target", value_parser = crate::commands::targets::parse_target_arg)]
     pub targets: Vec<(crate::commands::targets::TargetKind, String)>,
+
+    /// Output format: `text` (default) or `json`.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -283,6 +321,11 @@ pub struct InitArgs {
     /// Overwrite the output file if it already exists.
     #[arg(long)]
     pub force: bool,
+
+    /// Output format: `text` (default) or `json`. JSON mode implies
+    /// `--non-interactive`.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
