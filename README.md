@@ -14,6 +14,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ `${var}` interpolation (file `variables:` section, `--variable foo=bar` CLI overrides take precedence, special variables `${env}`/`${org}`/`${region}`, reserved-name rejection, hard error on missing variable)
 - ✅ Per-env variables: the `variables:` section accepts either a flat `key: value` map (default) or a `group → key: value` map keyed by `${env}` with a special `common` group always merged in
 - ✅ Secrets: `${secrets.foo}` references resolved from a `<project>.secrets` (or `<project>.<env>.secrets`) sidecar file or from `--secrets-path FILE`. Usable inside the `variables:` section too.
+- ✅ `--variable-path FILE` (repeatable): load CLI-level variable overrides from a YAML/JSON file (flat `key: value` map), same precedence layer as `--variable foo=bar` but lower priority.
 - ✅ `clever-tools` wrapper (read + write):
     - read: `list_apps`, `list_addons`, `get_env`, `get_domains`, `get_services`
     - write: `create_app`, `delete_app`, `create_addon`, `delete_addon`, `env_replace`, `domain_add`, `domain_rm`, `scale`, `link_addon`/`unlink_addon`, `link_app`/`unlink_app`
@@ -26,7 +27,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ todo · ⛔ out of scope for the pro
 - ✅ Provider-name mapping for addon creation (`postgresql` → `postgresql-addon`, `cellar` → `cellar-addon`, `matomo` → `addon-matomo`, etc. — pass-through for anything unknown)
 - ✅ `--env <value>` shortcut on `apply` and `delete` to set the special `${env}` variable
 - ✅ `--dry-run` flag on `apply` and `delete`: reads current state but logs `[dry-run]` mutations instead of executing them
-- ✅ 28 unit tests green, build with no warnings
+- ✅ 32 unit tests green, build with no warnings
 
 ### Decisions
 
@@ -63,10 +64,10 @@ clever-project read --org orga_xxx --app frontend --addon main-db -o project.yam
 clever-project read --org orga_xxx --all -o project.yaml
 
 # Apply a project file
-clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--variable foo=bar] [--secrets-path FILE] [--dry-run]
+clever-project apply project.yaml [--org ...] [--region ...] [--env staging] [--variable foo=bar] [--variable-path vars.yaml] [--secrets-path FILE] [--dry-run]
 
 # Delete the resources listed in a project file
-clever-project delete project.yaml [--org ...] [--env staging] [--secrets-path FILE] [--dry-run]
+clever-project delete project.yaml [--org ...] [--env staging] [--variable-path vars.yaml] [--secrets-path FILE] [--dry-run]
 
 # real world example app creation
 clever-project apply ./test_project.yaml --org orga_xxxxxxx --env dev
@@ -125,10 +126,30 @@ So with the example above:
 - `clever-project apply project.yaml --env dev` → `domain=dev.bar`, `apikey=secret_for_dev`
 - `clever-project apply project.yaml --env staging` → only `common` applies; any reference to `${apikey}` errors out
 
+### Loading variables from a file (`--variable-path`)
+
+You can also load CLI-level overrides from a YAML or JSON file (flat `key: value` map, scalars only). The flag is repeatable; later files override earlier ones.
+
+```yaml
+# vars.yaml
+domain: example.com
+apikey: from-file
+```
+
+```sh
+clever-project apply project.yaml --variable-path vars.yaml
+```
+
+### Precedence (low → high)
+1. Project file `variables:` section (group merged with `common` if per-env form)
+2. `--variable-path FILE` entries (in order, later files override earlier ones)
+3. `--variable foo=bar` entries
+4. `--env <value>` for the special `${env}` variable
+
 ### Rules
 - The two shapes can't be mixed — every top-level value must be either all scalars (flat) or all mappings (per-env).
 - The reserved names `env`, `org`, `region` cannot be redefined in `variables:` (any form).
-- `--variable foo=bar` on the CLI overrides any value from the file, regardless of the form.
+- `--variable foo=bar` on the CLI overrides any value from the file or from `--variable-path`.
 - If `${env}` doesn't match any per-env group, only `common` is available — references to env-specific variables will fail loudly.
 
 ## Secrets
