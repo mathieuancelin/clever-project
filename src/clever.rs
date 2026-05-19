@@ -186,8 +186,9 @@ impl Clever {
         self.run(&["delete", "--app", app, "--yes"])
     }
 
-    /// Create an addon. Returns the new addon id (looked up by name).
-    pub fn create_addon(&self, params: &CreateAddon<'_>) -> Result<String> {
+    /// Create an addon. Returns the new addon id and its underlying realId,
+    /// both looked up by name after creation.
+    pub fn create_addon(&self, params: &CreateAddon<'_>) -> Result<CreatedAddon> {
         if self.dry_run {
             info!(
                 "[dry-run] would create addon `{}` (provider={}, region={}, plan={:?}, version={:?}, crypted={})",
@@ -198,7 +199,11 @@ impl Clever {
                 params.version,
                 params.crypted
             );
-            return Ok(dry_run_id("addon", params.name));
+            let id = dry_run_id("addon", params.name);
+            return Ok(CreatedAddon {
+                addon_id: id.clone(),
+                real_id: format!("{id}-real"),
+            });
         }
 
         let mut args: Vec<&str> = vec![
@@ -238,7 +243,10 @@ impl Clever {
         addons
             .into_iter()
             .find(|a| a.name == params.name)
-            .map(|a| a.addon_id)
+            .map(|a| CreatedAddon {
+                addon_id: a.addon_id,
+                real_id: a.real_id,
+            })
             .ok_or_else(|| anyhow!("addon `{}` not found after creation", params.name))
     }
 
@@ -408,6 +416,82 @@ impl Clever {
         }
         self.run(&["service", "unlink-app", dep, "--app", app])
     }
+
+    // -------- network groups --------
+
+    /// List all network groups in the given organisation along with their
+    /// currently linked members.
+    pub fn list_network_groups(&self, org: &str) -> Result<Vec<ListedNetworkGroup>> {
+        let json = self.run_json(&["ng", "--format", "json", "--org", org])?;
+        serde_json::from_value(json).context("decoding `ng list` output")
+    }
+
+    /// Create a network group. Returns its new `ng_xxx` id (looked up by
+    /// label after creation).
+    pub fn create_network_group(&self, params: &CreateNetworkGroup<'_>) -> Result<String> {
+        if self.dry_run {
+            info!(
+                "[dry-run] would create network group `{}` (description={:?}, members={:?})",
+                params.label, params.description, params.members
+            );
+            return Ok(dry_run_id("ng", params.label));
+        }
+        let mut args: Vec<&str> = vec!["ng", "create", params.label, "--org", params.org];
+        if let Some(d) = params.description {
+            args.push("--description");
+            args.push(d);
+        }
+        let members_csv;
+        if !params.members.is_empty() {
+            members_csv = params.members.join(",");
+            args.push("--link");
+            args.push(&members_csv);
+        }
+        self.run(&args)?;
+        let ngs = self.list_network_groups(params.org)?;
+        ngs.into_iter()
+            .find(|n| n.label == params.label)
+            .map(|n| n.id)
+            .ok_or_else(|| anyhow!("network group `{}` not found after creation", params.label))
+    }
+
+    pub fn delete_network_group(&self, id_or_label: &str, org: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would delete network group `{id_or_label}`");
+            return Ok(());
+        }
+        self.run(&["ng", "delete", id_or_label, "--org", org])
+    }
+
+    pub fn ng_link(&self, member_id: &str, ng_id_or_label: &str, org: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would link `{member_id}` to network group `{ng_id_or_label}`");
+            return Ok(());
+        }
+        self.run(&["ng", "link", member_id, ng_id_or_label, "--org", org])
+    }
+
+    pub fn ng_unlink(&self, member_id: &str, ng_id_or_label: &str, org: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would unlink `{member_id}` from network group `{ng_id_or_label}`");
+            return Ok(());
+        }
+        self.run(&["ng", "unlink", member_id, ng_id_or_label, "--org", org])
+    }
+}
+
+#[derive(Debug)]
+pub struct CreatedAddon {
+    pub addon_id: String,
+    pub real_id: String,
+}
+
+#[derive(Debug)]
+pub struct CreateNetworkGroup<'a> {
+    pub label: &'a str,
+    pub org: &'a str,
+    pub description: Option<&'a str>,
+    pub members: &'a [String],
 }
 
 /// Synthetic id used in dry-run mode so dependency resolution still has
@@ -457,6 +541,10 @@ pub struct ListedApp {
 pub struct ListedAddon {
     #[serde(rename = "addonId")]
     pub addon_id: String,
+    /// Underlying provider-specific id used by `clever ng link`
+    /// (e.g. `postgresql_xxx`, `redis_xxx`).
+    #[serde(rename = "realId")]
+    pub real_id: String,
     pub name: String,
     #[serde(rename = "planName")]
     #[allow(dead_code)]
@@ -470,6 +558,22 @@ pub struct ListedAddon {
     /// Human-readable provider name (e.g. `PostgreSQL`).
     #[serde(rename = "type")]
     pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListedNetworkGroup {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub members: Vec<NetworkGroupMember>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkGroupMember {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
