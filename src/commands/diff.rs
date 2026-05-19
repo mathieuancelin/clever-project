@@ -1,31 +1,37 @@
 use std::collections::BTreeSet;
 
 use indexmap::IndexMap;
+use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FieldDiff {
     pub field: String,
     pub body: DiffBody,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum DiffBody {
     Scalar { file: String, live: String },
-    Set(Vec<SetEntry>),
-    Map(Vec<MapEntry>),
+    Set { entries: Vec<SetEntry> },
+    Map { entries: Vec<MapEntry> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SetEntry {
-    pub op: char, // '+', '-'
+    /// `'+'` (only in file) or `'-'` (only live).
+    pub op: char,
     pub value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MapEntry {
-    pub op: char, // '+', '-', '~'
+    /// `'+'` (only in file), `'-'` (only live), `'~'` (changed).
+    pub op: char,
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub live: Option<String>,
 }
 
@@ -50,7 +56,7 @@ pub fn diff_set(field: &str, file: &[String], live: &[String]) -> Option<FieldDi
     }
     Some(FieldDiff {
         field: field.into(),
-        body: DiffBody::Set(entries),
+        body: DiffBody::Set { entries },
     })
 }
 
@@ -91,7 +97,7 @@ pub fn diff_map(
     }
     Some(FieldDiff {
         field: field.into(),
-        body: DiffBody::Map(entries),
+        body: DiffBody::Map { entries },
     })
 }
 
@@ -146,7 +152,7 @@ mod tests {
             &["b".into(), "c".into()],
         )
         .unwrap();
-        let DiffBody::Set(entries) = &d.body else {
+        let DiffBody::Set { entries } = &d.body else {
             panic!()
         };
         let added: Vec<&str> = entries
@@ -174,7 +180,7 @@ mod tests {
         l.insert("REMOVED".into(), "old".into());
         l.insert("CHANGED".into(), "before".into());
         let d = diff_map("env", &f, &l).unwrap();
-        let DiffBody::Map(entries) = &d.body else {
+        let DiffBody::Map { entries } = &d.body else {
             panic!()
         };
         assert_eq!(entries.len(), 3);
