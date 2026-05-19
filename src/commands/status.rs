@@ -41,7 +41,7 @@ pub fn run(args: StatusArgs) -> Result<()> {
     let state = State::load(&file)?;
 
     let clever = Clever::new()?;
-    let live = live_snapshot(&clever, &project.org)
+    let live = live_snapshot(&clever, &project.org, &project)
         .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
 
     let report = compute_report(&project, &live, &state);
@@ -121,7 +121,9 @@ fn compute_report(project: &Project, live: &LiveSnapshot, state: &State) -> Repo
         }
     }
     // Orphans: live apps that aren't in the file but are tracked in state.
-    for live_name in live.apps.keys() {
+    // We iterate the full org listing (live.live_app_names) — `live.apps`
+    // only carries detailed entries for project resources.
+    for live_name in &live.live_app_names {
         if seen_app_names.contains(live_name) {
             continue;
         }
@@ -172,7 +174,7 @@ fn compute_report(project: &Project, live: &LiveSnapshot, state: &State) -> Repo
             }),
         }
     }
-    for live_name in live.addons.keys() {
+    for live_name in &live.live_addon_names {
         if seen_addon_names.contains(live_name) {
             continue;
         }
@@ -218,7 +220,7 @@ fn compute_report(project: &Project, live: &LiveSnapshot, state: &State) -> Repo
             }),
         }
     }
-    for live_name in live.network_groups.keys() {
+    for live_name in &live.live_ng_names {
         if seen_ng_names.contains(live_name) {
             continue;
         }
@@ -691,13 +693,20 @@ mod tests {
         let mut live_apps: IndexMap<String, App> = IndexMap::new();
         live_apps.insert("synced".into(), make_app("synced", "node"));
         live_apps.insert("drifted".into(), make_app("drifted", "node"));
-        // Orphan: live app not in file, but in state below.
-        live_apps.insert("orphan".into(), make_app("orphan", "node"));
+        // `apps` only holds project-matched entries; the orphan lives only
+        // in `live_app_names`, as the real snapshot produces.
+        let mut live_app_names = std::collections::BTreeSet::new();
+        live_app_names.insert("synced".into());
+        live_app_names.insert("drifted".into());
+        live_app_names.insert("orphan".into());
         let live = LiveSnapshot {
             apps: live_apps,
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
             default_region: "par".into(),
+            live_app_names,
+            live_addon_names: Default::default(),
+            live_ng_names: Default::default(),
         };
 
         // Hand-built state that tracks the orphan app.
