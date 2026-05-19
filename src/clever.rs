@@ -122,6 +122,16 @@ impl Clever {
         serde_json::from_value(json).context("decoding `service` output")
     }
 
+    /// List every add-on provider available to the given organisation,
+    /// along with their plans and supported regions. Used to validate
+    /// project-file addon specs (kind, size) before sending anything to
+    /// Clever.
+    pub fn list_addon_providers(&self, org: &str) -> Result<Vec<AddonProvider>> {
+        let url = format!("https://api.clever-cloud.com/v2/products/addonproviders?orgaId={org}");
+        let json = self.run_json(&["curl", &url])?;
+        serde_json::from_value(json).context("decoding addon providers output")
+    }
+
     // -------- write side --------
 
     /// Create an application. Returns the new app id (looked up by name after
@@ -478,6 +488,24 @@ pub struct Services {
 pub struct ServiceRef {
     pub id: String,
     #[serde(default)]
+    #[allow(dead_code)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddonProvider {
+    pub id: String,
+    #[allow(dead_code)]
+    pub name: String,
+    #[serde(default)]
+    pub regions: Vec<String>,
+    #[serde(default)]
+    pub plans: Vec<AddonPlan>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddonPlan {
+    pub slug: String,
     #[allow(dead_code)]
     pub name: String,
 }
