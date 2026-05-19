@@ -17,6 +17,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         args.org,
         args.region,
         &variables,
+        args.secrets_path.as_deref(),
     )
     .with_context(|| format!("loading project `{}`", args.file.display()))?;
 
