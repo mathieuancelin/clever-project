@@ -10,9 +10,8 @@ use tracing::debug;
 
 use crate::interpolate::Resolver;
 
-static SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$\{secrets\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap()
-});
+static SECRET_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{secrets\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -333,8 +332,12 @@ fn read_secrets_file(path: &Path, required: bool) -> Result<IndexMap<String, Str
     }
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading secrets file `{}`", path.display()))?;
-    let value = parse_yaml_or_json(&raw)
-        .with_context(|| format!("parsing secrets file `{}` (neither YAML nor JSON)", path.display()))?;
+    let value = parse_yaml_or_json(&raw).with_context(|| {
+        format!(
+            "parsing secrets file `{}` (neither YAML nor JSON)",
+            path.display()
+        )
+    })?;
     let mapping = match value {
         Value::Mapping(m) => m,
         Value::Null => return Ok(IndexMap::new()),
@@ -448,8 +451,8 @@ fn load_value(path: &Path) -> Result<Value> {
         .with_context(|| format!("reading project file `{}`", path.display()))?;
     // JSON is a subset of YAML 1.2, so the YAML parser handles both.
     let _ = Format::from_path(path)?; // validate extension up front
-    let value: Value = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parsing `{}`", path.display()))?;
+    let value: Value =
+        serde_yaml::from_str(&raw).with_context(|| format!("parsing `{}`", path.display()))?;
     Ok(value)
 }
 
@@ -637,7 +640,11 @@ apps:
 
     fn write_named(name: &str, contents: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("clever-project-test-{}-{}", std::process::id(), rand_suffix()));
+        p.push(format!(
+            "clever-project-test-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p.push(name);
         std::fs::write(&p, contents).unwrap();
@@ -676,7 +683,10 @@ apps:
             None,
         )
         .unwrap();
-        assert_eq!(project.apps.get("a").unwrap().env.get("K").unwrap(), "dev-token");
+        assert_eq!(
+            project.apps.get("a").unwrap().env.get("K").unwrap(),
+            "dev-token"
+        );
     }
 
     #[test]
@@ -690,7 +700,10 @@ apps:
 
         let (project, _r) =
             Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
-        assert_eq!(project.apps.get("a").unwrap().env.get("K").unwrap(), "super-secret");
+        assert_eq!(
+            project.apps.get("a").unwrap().env.get("K").unwrap(),
+            "super-secret"
+        );
     }
 
     #[test]
@@ -713,11 +726,14 @@ apps:
     fn variables_file_yaml_loads_flat_pairs() {
         let p = write_tmp("yaml", "foo: bar\ncount: 3\nflag: true\n");
         let pairs = load_variables_file(&p).unwrap();
-        assert_eq!(pairs, vec![
-            ("foo".to_string(), "bar".to_string()),
-            ("count".to_string(), "3".to_string()),
-            ("flag".to_string(), "true".to_string()),
-        ]);
+        assert_eq!(
+            pairs,
+            vec![
+                ("foo".to_string(), "bar".to_string()),
+                ("count".to_string(), "3".to_string()),
+                ("flag".to_string(), "true".to_string()),
+            ]
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -780,7 +796,11 @@ apps:
         let dir = project_path.parent().unwrap();
         // Non-mapping at the root would also be rejected — but here let's
         // craft something neither parser will accept (unbalanced braces).
-        std::fs::write(dir.join("bad.secrets"), "{ this is: not valid: in :: any format ]").unwrap();
+        std::fs::write(
+            dir.join("bad.secrets"),
+            "{ this is: not valid: in :: any format ]",
+        )
+        .unwrap();
         let err = Project::load_and_resolve(&project_path, None, None, &[], None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("YAML") || msg.contains("JSON"));
