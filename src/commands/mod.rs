@@ -5,6 +5,7 @@ pub mod diff;
 pub mod init;
 pub mod live;
 pub mod plan;
+pub mod prompt;
 pub mod read;
 pub mod status;
 
