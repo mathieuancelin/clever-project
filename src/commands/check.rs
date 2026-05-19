@@ -39,6 +39,7 @@ pub fn run(args: CheckArgs) -> Result<()> {
 
     // 2. Static cross-resource checks.
     validate_dependencies(&project)?;
+    validate_network_groups(&project)?;
     validate_unique_names(&project)?;
 
     // 3. Optional live API validation (addons catalog + app flavors).
@@ -101,10 +102,27 @@ fn validate_dependencies(project: &Project) -> Result<()> {
     Ok(())
 }
 
-/// Resource names must be unique among apps, and unique among addons. An
-/// app and an addon can share a name (they're different resource types on
-/// Clever), but two apps or two addons sharing a name would clash on
-/// `name → id` lookups.
+/// Every `link:` entry in a network group must reference an existing
+/// project key (in `apps:` or `addons:`).
+fn validate_network_groups(project: &Project) -> Result<()> {
+    for (ng_key, ng) in &project.network_groups {
+        for dep_key in &ng.link {
+            let in_apps = project.apps.contains_key(dep_key);
+            let in_addons = project.addons.contains_key(dep_key);
+            if !in_apps && !in_addons {
+                bail!(
+                    "network group `{ng_key}` links unknown project key `{dep_key}`: not in `apps:` or `addons:`"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resource names must be unique among apps, unique among addons, and unique
+/// among network groups. An app, an addon and an NG can share a name across
+/// types (they live in different Clever namespaces), but two of the same
+/// type sharing a name would clash on `name → id` lookups.
 fn validate_unique_names(project: &Project) -> Result<()> {
     let mut seen_apps: HashMap<&str, &str> = HashMap::new();
     for (key, app) in &project.apps {
@@ -130,14 +148,34 @@ fn validate_unique_names(project: &Project) -> Result<()> {
             );
         }
     }
+    let mut seen_ngs: HashMap<&str, &str> = HashMap::new();
+    for (key, ng) in &project.network_groups {
+        if ng.name.trim().is_empty() {
+            bail!("network group `{key}` has an empty `name`");
+        }
+        if let Some(prev) = seen_ngs.insert(&ng.name, key) {
+            bail!(
+                "network groups `{prev}` and `{key}` both resolve to the same name `{}`",
+                ng.name
+            );
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Addon, App};
+    use crate::model::{Addon, App, NetworkGroup};
     use indexmap::IndexMap;
+
+    fn empty_ng(name: &str, links: &[&str]) -> NetworkGroup {
+        NetworkGroup {
+            name: name.to_string(),
+            description: None,
+            link: links.iter().map(|s| s.to_string()).collect(),
+        }
+    }
 
     fn empty_app(name: &str, kind: &str) -> App {
         App {
@@ -174,7 +212,7 @@ mod tests {
             variables: IndexMap::new(),
             apps: IndexMap::new(),
             addons: IndexMap::new(),
-            network_groups: None,
+            network_groups: IndexMap::new(),
         }
     }
 
@@ -253,6 +291,49 @@ mod tests {
             .addons
             .insert("d".to_string(), empty_addon("dual", "postgresql"));
         validate_unique_names(&project).unwrap();
+    }
+
+    #[test]
+    fn ng_link_must_reference_known_key() {
+        let mut project = make_project();
+        project
+            .apps
+            .insert("api".to_string(), empty_app("api", "node"));
+        project
+            .network_groups
+            .insert("net".to_string(), empty_ng("vpn", &["api", "ghost"]));
+        let err = validate_network_groups(&project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ghost"));
+    }
+
+    #[test]
+    fn ng_with_only_known_links_passes() {
+        let mut project = make_project();
+        project
+            .apps
+            .insert("api".to_string(), empty_app("api", "node"));
+        project
+            .addons
+            .insert("db".to_string(), empty_addon("db", "postgresql"));
+        project
+            .network_groups
+            .insert("net".to_string(), empty_ng("vpn", &["api", "db"]));
+        validate_network_groups(&project).unwrap();
+    }
+
+    #[test]
+    fn duplicate_ng_names_rejected() {
+        let mut project = make_project();
+        project
+            .network_groups
+            .insert("a".to_string(), empty_ng("dup", &[]));
+        project
+            .network_groups
+            .insert("b".to_string(), empty_ng("dup", &[]));
+        let err = validate_unique_names(&project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("dup"));
     }
 
     #[test]
