@@ -32,11 +32,7 @@ impl OrgCache {
         self.addons = None;
     }
 
-    pub fn apps(
-        &mut self,
-        clever: &Clever,
-        org: &str,
-    ) -> Result<&HashMap<String, ListedApp>> {
+    pub fn apps(&mut self, clever: &Clever, org: &str) -> Result<&HashMap<String, ListedApp>> {
         if self.apps.is_none() {
             info!("listing applications in org `{org}`");
             self.apps = Some(
@@ -50,11 +46,7 @@ impl OrgCache {
         Ok(self.apps.as_ref().unwrap())
     }
 
-    pub fn addons(
-        &mut self,
-        clever: &Clever,
-        org: &str,
-    ) -> Result<&HashMap<String, ListedAddon>> {
+    pub fn addons(&mut self, clever: &Clever, org: &str) -> Result<&HashMap<String, ListedAddon>> {
         if self.addons.is_none() {
             info!("listing addons in org `{org}`");
             self.addons = Some(
