@@ -21,6 +21,9 @@ pub enum Command {
     Apply(ApplyArgs),
     /// Delete resources listed in a project file
     Delete(DeleteArgs),
+    /// Validate a project file (syntax, variables, dependencies, sizing,
+    /// kinds, regions). Doesn't modify anything.
+    Check(CheckArgs),
 }
 
 #[derive(Debug, Args)]
@@ -84,6 +87,44 @@ pub struct ApplyArgs {
     /// mutating anything on Clever Cloud.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// Project file path (.yaml/.yml/.json)
+    pub file: PathBuf,
+
+    /// Override the organisation defined in the project file
+    #[arg(long)]
+    pub org: Option<String>,
+
+    /// Override the default region defined in the project file
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// Value for the special variable `${env}` (default `prod`)
+    #[arg(long)]
+    pub env: Option<String>,
+
+    /// Set a variable (key=value). Overrides values from the project file
+    /// and from --variable-path.
+    #[arg(long = "variable", value_parser = parse_kv)]
+    pub variables: Vec<(String, String)>,
+
+    /// Load variable overrides from a YAML/JSON file (repeatable).
+    #[arg(long = "variable-path")]
+    pub variable_paths: Vec<PathBuf>,
+
+    /// Explicit path to a secrets file.
+    #[arg(long)]
+    pub secrets_path: Option<PathBuf>,
+
+    /// Skip live validation against Clever's API (addon catalog, app
+    /// instance flavors). Useful in CI environments without `clever login`.
+    /// Static validation (syntax, variables, kinds, regions, dependencies,
+    /// uniqueness) is always performed.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Debug, Args)]
