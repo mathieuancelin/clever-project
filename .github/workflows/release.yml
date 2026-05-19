@@ -1,0 +1,104 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: clever-project
+
+jobs:
+  create-release:
+    name: create github release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: extract version from tag
+        id: meta
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: check Cargo.toml version matches tag
+        run: |
+          file_version=$(grep -E '^version = ' Cargo.toml | head -n1 | sed -E 's/version = "([^"]+)"/\1/')
+          if [ "$file_version" != "${{ steps.meta.outputs.version }}" ]; then
+            echo "Cargo.toml version ($file_version) does not match tag (${{ steps.meta.outputs.version }})" >&2
+            exit 1
+          fi
+
+      - name: create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  build-and-upload:
+    name: build (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: build & upload to release
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: ${{ env.BIN_NAME }}
+          target: ${{ matrix.target }}
+          archive: $bin-$tag-$target
+          tar: unix
+          zip: windows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crates-io:
+    name: publish to crates.io
+    needs: build-and-upload
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo publish
+        run: cargo publish --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
