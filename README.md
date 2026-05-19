@@ -23,9 +23,31 @@ The CLI doesn't manage nvm/bun for you — make sure `clever --version` works in
 
 ## Install
 
+Pick one:
+
+### Pre-built binary (recommended)
+
+Each tagged release publishes archives for Linux (x86_64 / aarch64, gnu + musl), macOS (x86_64 / aarch64) and Windows (x86_64 / aarch64) on the GitHub Releases page:
+
+```
+https://github.com/<owner>/clever-project/releases/latest
+```
+
+Download the archive matching your platform, extract, and put `clever-project` somewhere on your `PATH`.
+
+### From crates.io
+
 ```sh
+cargo install clever-project
+```
+
+### From source
+
+```sh
+git clone https://github.com/<owner>/clever-project.git
+cd clever-project
 cargo install --path .
-# or, from a checkout:
+# or just:
 cargo build --release
 ./target/release/clever-project --help
 ```
