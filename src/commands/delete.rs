@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::clever::Clever;
@@ -47,9 +48,15 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     let targets = targets_mod::build(&args.targets, &project)
         .with_context(|| "validating --target flags".to_string())?;
 
-    print!("{}", render_delete_plan(&project, &targets));
-
     let total = count_targets(&project, &targets);
+
+    if args.format.is_json() {
+        let payload = json_plan(&project, &targets);
+        let out = serde_json::to_string_pretty(&payload).context("serializing JSON plan")?;
+        println!("{out}");
+    } else {
+        print!("{}", render_delete_plan(&project, &targets));
+    }
 
     if args.dry_run {
         info!("dry-run: {total} resource(s) would be deleted");
@@ -60,6 +67,9 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         return Ok(());
     }
     if !args.yes {
+        if args.format.is_json() {
+            bail!("--format json requires --yes (no prompts in JSON mode)");
+        }
         if !prompt::stdin_is_tty() {
             bail!(
                 "stdin is not a TTY and --yes was not given; pass --yes (or --auto-approve) to run delete non-interactively"
@@ -231,6 +241,64 @@ fn call_delete(clever: &Clever, kind: ResourceKind, id: &str, org: &str) -> Resu
         ResourceKind::App => clever.delete_app(id),
         ResourceKind::Addon => clever.delete_addon(id, org),
         ResourceKind::NetworkGroup => clever.delete_network_group(id, org),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct JsonDeletePlan<'a> {
+    project: &'a str,
+    org: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    targeting: Vec<String>,
+    summary: JsonDeleteSummary,
+    network_groups: Vec<&'a str>,
+    apps: Vec<&'a str>,
+    addons: Vec<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonDeleteSummary {
+    to_destroy: usize,
+}
+
+fn json_plan<'a>(project: &'a Project, targets: &'a Targets) -> JsonDeletePlan<'a> {
+    let ng_names: Vec<&str> = project
+        .network_groups
+        .iter()
+        .filter(|(k, _)| targets.is_targeted(TargetKind::NetworkGroup, k))
+        .map(|(_, n)| n.name.as_str())
+        .collect();
+    let app_names: Vec<&str> = project
+        .apps
+        .iter()
+        .filter(|(k, _)| targets.is_targeted(TargetKind::App, k))
+        .map(|(_, a)| a.name.as_str())
+        .collect();
+    let addon_names: Vec<&str> = project
+        .addons
+        .iter()
+        .filter(|(k, _)| targets.is_targeted(TargetKind::Addon, k))
+        .map(|(_, a)| a.name.as_str())
+        .collect();
+    let total = ng_names.len() + app_names.len() + addon_names.len();
+    let mut targeting: Vec<String> = Vec::new();
+    for k in &targets.apps {
+        targeting.push(format!("apps.{k}"));
+    }
+    for k in &targets.addons {
+        targeting.push(format!("addons.{k}"));
+    }
+    for k in &targets.network_groups {
+        targeting.push(format!("network_groups.{k}"));
+    }
+    JsonDeletePlan {
+        project: &project.name,
+        org: &project.org,
+        targeting,
+        summary: JsonDeleteSummary { to_destroy: total },
+        network_groups: ng_names,
+        apps: app_names,
+        addons: addon_names,
     }
 }
 
