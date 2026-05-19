@@ -345,6 +345,16 @@ impl Clever {
         self.run(&refs)
     }
 
+    /// Restart (or kick off the first deployment of) an application.
+    /// Uses `--quiet` so we don't pollute the output with deployment logs.
+    pub fn restart(&self, app: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would restart app `{app}`");
+            return Ok(());
+        }
+        self.run(&["restart", "--app", app, "--quiet"])
+    }
+
     pub fn link_addon(&self, app: &str, addon: &str) -> Result<()> {
         if self.dry_run {
             info!("[dry-run] would link addon `{addon}` to `{app}`");
