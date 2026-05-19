@@ -1,11 +1,18 @@
 use std::path::Path;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow, bail};
 use indexmap::IndexMap;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
+use tracing::debug;
 
 use crate::interpolate::Resolver;
+
+static SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\$\{secrets\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap()
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -129,6 +136,7 @@ impl Project {
         org_override: Option<String>,
         region_override: Option<String>,
         cli_vars: &[(String, String)],
+        secrets_path: Option<&Path>,
     ) -> Result<(Self, Resolver)> {
         let mut value = load_value(path)?;
         let map = value
@@ -161,12 +169,23 @@ impl Project {
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "prod".to_string());
 
+        let secrets = load_secrets(path, &effective_env, secrets_path)?;
+
         let raw_variables = map
             .remove(Value::String("variables".into()))
             .unwrap_or(Value::Null);
         let file_vars = parse_variables(&raw_variables, &effective_env)?;
+        // Allow `${secrets.X}` inside variable values.
+        let file_vars = expand_secrets(file_vars, &secrets)?;
 
-        let resolver = Resolver::build(&file_vars, cli_vars, org.clone(), region.clone())?;
+        // Build the merged map: file vars first, then secrets exposed under
+        // their `secrets.<key>` namespace. Resolver::build will layer
+        // cli_vars on top and add env/org/region.
+        let mut combined = file_vars;
+        for (k, v) in &secrets {
+            combined.insert(format!("secrets.{k}"), v.clone());
+        }
+        let resolver = Resolver::build(&combined, cli_vars, org.clone(), region.clone())?;
 
         // Apply CLI overrides into the value tree so the deserialized Project
         // reflects them. The `variables` section was removed earlier — the
@@ -264,6 +283,115 @@ fn collect_scalar_entries(
     Ok(())
 }
 
+/// Load the secrets map for a project.
+///
+/// - If `explicit` is `Some(path)`, only that file is loaded and it must exist.
+/// - Otherwise, both `<project>.secrets` (the env-agnostic defaults) and
+///   `<project>.<env>.secrets` (env-specific overrides) are auto-discovered
+///   next to the project file. Either or both may be absent — that's fine.
+///   When both are present, the env-specific entries override the defaults.
+fn load_secrets(
+    project_path: &Path,
+    env: &str,
+    explicit: Option<&Path>,
+) -> Result<IndexMap<String, String>> {
+    if let Some(p) = explicit {
+        return read_secrets_file(p, /* required */ true);
+    }
+
+    let mut out = IndexMap::new();
+    let stem = project_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let dir = project_path.parent().unwrap_or(Path::new("."));
+    if !stem.is_empty() {
+        let default_path = dir.join(format!("{stem}.secrets"));
+        if default_path.exists() {
+            debug!("loading secrets from `{}`", default_path.display());
+            for (k, v) in read_secrets_file(&default_path, false)? {
+                out.insert(k, v);
+            }
+        }
+        let env_path = dir.join(format!("{stem}.{env}.secrets"));
+        if env_path.exists() {
+            debug!("loading env-specific secrets from `{}`", env_path.display());
+            for (k, v) in read_secrets_file(&env_path, false)? {
+                out.insert(k, v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn read_secrets_file(path: &Path, required: bool) -> Result<IndexMap<String, String>> {
+    if !path.exists() {
+        if required {
+            bail!("secrets file `{}` not found", path.display());
+        }
+        return Ok(IndexMap::new());
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading secrets file `{}`", path.display()))?;
+    let value: Value = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parsing secrets file `{}`", path.display()))?;
+    let mapping = match value {
+        Value::Mapping(m) => m,
+        Value::Null => return Ok(IndexMap::new()),
+        _ => bail!("secrets file `{}` must be a mapping", path.display()),
+    };
+    let mut out = IndexMap::new();
+    for (k, v) in mapping {
+        let key = k
+            .as_str()
+            .ok_or_else(|| anyhow!("secret keys must be strings (in `{}`)", path.display()))?
+            .to_string();
+        let val = match v {
+            Value::String(s) => s,
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::Null => String::new(),
+            _ => bail!(
+                "secret `{key}` in `{}` must be a scalar (string/number/bool)",
+                path.display()
+            ),
+        };
+        out.insert(key, val);
+    }
+    Ok(out)
+}
+
+/// Expand `${secrets.X}` references inside the values of the project's
+/// variables section, before they're handed to the resolver. References to
+/// other variables (`${foo}`) are left untouched here — they're handled by
+/// the resolver during the value-tree walk.
+fn expand_secrets(
+    vars: IndexMap<String, String>,
+    secrets: &IndexMap<String, String>,
+) -> Result<IndexMap<String, String>> {
+    let mut out = IndexMap::with_capacity(vars.len());
+    for (k, v) in vars {
+        let mut missing: Option<String> = None;
+        let resolved = SECRET_RE.replace_all(&v, |caps: &regex::Captures| {
+            let name = &caps[1];
+            match secrets.get(name) {
+                Some(val) => val.clone(),
+                None => {
+                    if missing.is_none() {
+                        missing = Some(name.to_string());
+                    }
+                    String::new()
+                }
+            }
+        });
+        if let Some(name) = missing {
+            bail!("undefined secret `{name}` referenced in variable `{k}`");
+        }
+        out.insert(k, resolved.into_owned());
+    }
+    Ok(out)
+}
+
 fn load_value(path: &Path) -> Result<Value> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading project file `{}`", path.display()))?;
@@ -345,7 +473,7 @@ addons:
     fn loads_and_resolves_spec_sample() {
         let p = write_tmp("yaml", SAMPLE);
         let (project, _r) =
-            Project::load_and_resolve(&p, None, None, &[]).expect("load failed");
+            Project::load_and_resolve(&p, None, None, &[], None).expect("load failed");
         assert_eq!(project.name, "My Project");
         assert_eq!(project.org, "orga_orga-clevercloud-cible");
         assert_eq!(project.region, "par");
@@ -364,6 +492,7 @@ addons:
             Some("override_org".into()),
             Some("rbx".into()),
             &[("env".to_string(), "staging".to_string())],
+            None,
         )
         .unwrap();
         assert_eq!(project.org, "override_org");
@@ -376,7 +505,7 @@ addons:
     fn missing_var_propagates() {
         let bad = "name: x\norg: o\nregion: r\napps:\n  a:\n    name: ${missing}\n    kind: node\n";
         let p = write_tmp("yaml", bad);
-        let err = Project::load_and_resolve(&p, None, None, &[]).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
         assert!(err.to_string().contains("missing"));
         std::fs::remove_file(&p).ok();
     }
@@ -385,7 +514,7 @@ addons:
     fn json_format_works_too() {
         let json = r#"{"name":"P","org":"o","region":"par","apps":{"a":{"name":"${env}-app","kind":"node"}}}"#;
         let p = write_tmp("json", json);
-        let (project, _r) = Project::load_and_resolve(&p, None, None, &[]).unwrap();
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "prod-app");
         std::fs::remove_file(&p).ok();
     }
@@ -414,7 +543,7 @@ apps:
     #[test]
     fn per_env_picks_default_prod_group() {
         let p = write_tmp("yaml", PER_ENV);
-        let (project, _r) = Project::load_and_resolve(&p, None, None, &[]).unwrap();
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
         let app = project.apps.get("a").unwrap();
         assert_eq!(app.env.get("DOMAIN").unwrap(), "foo.bar");
         assert_eq!(app.env.get("APIKEY").unwrap(), "secret_for_prod");
@@ -429,6 +558,7 @@ apps:
             None,
             None,
             &[("env".to_string(), "dev".to_string())],
+            None,
         )
         .unwrap();
         let app = project.apps.get("a").unwrap();
@@ -447,10 +577,95 @@ apps:
             None,
             None,
             &[("env".to_string(), "staging".to_string())],
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("apikey"));
         std::fs::remove_file(&p).ok();
+    }
+
+    fn write_named(name: &str, contents: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("clever-project-test-{}-{}", std::process::id(), rand_suffix()));
+        std::fs::create_dir_all(&p).unwrap();
+        p.push(name);
+        std::fs::write(&p, contents).unwrap();
+        p
+    }
+
+    #[test]
+    fn secrets_auto_discover_default_file() {
+        let project_path = write_named(
+            "myproj.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: ${secrets.apikey}-app\n    kind: node\n",
+        );
+        let dir = project_path.parent().unwrap();
+        std::fs::write(dir.join("myproj.secrets"), "apikey: deadbeef\n").unwrap();
+
+        let (project, _r) =
+            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+        assert_eq!(project.apps.get("a").unwrap().name, "deadbeef-app");
+    }
+
+    #[test]
+    fn secrets_env_specific_overrides_default() {
+        let project_path = write_named(
+            "p.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: node\n    env:\n      K: ${secrets.token}\n",
+        );
+        let dir = project_path.parent().unwrap();
+        std::fs::write(dir.join("p.secrets"), "token: default-token\n").unwrap();
+        std::fs::write(dir.join("p.dev.secrets"), "token: dev-token\n").unwrap();
+
+        let (project, _r) = Project::load_and_resolve(
+            &project_path,
+            None,
+            None,
+            &[("env".to_string(), "dev".to_string())],
+            None,
+        )
+        .unwrap();
+        assert_eq!(project.apps.get("a").unwrap().env.get("K").unwrap(), "dev-token");
+    }
+
+    #[test]
+    fn secrets_usable_inside_variables_section() {
+        let project_path = write_named(
+            "x.yaml",
+            "name: P\norg: o\nregion: par\nvariables:\n  apikey: ${secrets.real}\napps:\n  a:\n    name: x\n    kind: node\n    env:\n      K: ${apikey}\n",
+        );
+        let dir = project_path.parent().unwrap();
+        std::fs::write(dir.join("x.secrets"), "real: super-secret\n").unwrap();
+
+        let (project, _r) =
+            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+        assert_eq!(project.apps.get("a").unwrap().env.get("K").unwrap(), "super-secret");
+    }
+
+    #[test]
+    fn secrets_explicit_path_overrides_autodiscovery() {
+        let project_path = write_named(
+            "y.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: ${secrets.k}-app\n    kind: node\n",
+        );
+        let dir = project_path.parent().unwrap();
+        std::fs::write(dir.join("y.secrets"), "k: from-default\n").unwrap();
+        let explicit = dir.join("custom.secrets");
+        std::fs::write(&explicit, "k: from-explicit\n").unwrap();
+
+        let (project, _r) =
+            Project::load_and_resolve(&project_path, None, None, &[], Some(&explicit)).unwrap();
+        assert_eq!(project.apps.get("a").unwrap().name, "from-explicit-app");
+    }
+
+    #[test]
+    fn missing_secret_errors() {
+        let project_path = write_named(
+            "z.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: ${secrets.nope}\n    kind: node\n",
+        );
+        let err = Project::load_and_resolve(&project_path, None, None, &[], None).unwrap_err();
+        assert!(err.to_string().contains("secrets.nope") || err.to_string().contains("nope"));
     }
 
     #[test]
@@ -466,7 +681,7 @@ variables:
 apps: {}
 "#;
         let p = write_tmp("yaml", mixed);
-        let err = Project::load_and_resolve(&p, None, None, &[]).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
         assert!(err.to_string().contains("either"));
         std::fs::remove_file(&p).ok();
     }
