@@ -97,7 +97,14 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     let live = live_snapshot(&clever, &project.org, &project)
         .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
     let plan = plan_mod::compute(&project, &live, &targets);
-    print!("{}", plan_mod::render(&plan, &project, &targets));
+
+    if args.format.is_json() {
+        let payload = plan_mod::to_json(&plan, &project, &targets);
+        let out = serde_json::to_string_pretty(&payload).context("serializing JSON plan")?;
+        println!("{out}");
+    } else {
+        print!("{}", plan_mod::render(&plan, &project, &targets));
+    }
 
     if args.dry_run {
         info!(
@@ -115,6 +122,9 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         return Ok(());
     }
     if !args.yes {
+        if args.format.is_json() {
+            bail!("--format json requires --yes (no prompts in JSON mode)");
+        }
         if !prompt::stdin_is_tty() {
             bail!(
                 "stdin is not a TTY and --yes was not given; pass --yes (or --auto-approve) to run apply non-interactively"
