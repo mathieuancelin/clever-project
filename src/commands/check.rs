@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use tracing::info;
 
 use crate::clever::Clever;
@@ -77,6 +78,26 @@ pub fn run(args: CheckArgs) -> Result<()> {
         }
     }
 
+    if args.format.is_json() {
+        let report = JsonReport {
+            ok: issues.is_empty(),
+            project: &project.name,
+            org: &project.org,
+            apps: project.apps.len(),
+            addons: project.addons.len(),
+            network_groups: project.network_groups.len(),
+            issues: issues.iter().map(|i| i.message.clone()).collect(),
+        };
+        let out = serde_json::to_string_pretty(&report).context("serializing JSON report")?;
+        println!("{out}");
+        if !report.ok {
+            // Exit non-zero so CI scripts can detect failure. The payload is
+            // already on stdout — message goes to stderr via anyhow.
+            bail!("validation failed ({} issue(s))", report.issues.len());
+        }
+        return Ok(());
+    }
+
     if !issues.is_empty() {
         bail!("{}", issues::render(&issues));
     }
@@ -87,6 +108,17 @@ pub fn run(args: CheckArgs) -> Result<()> {
         project.addons.len()
     );
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct JsonReport<'a> {
+    ok: bool,
+    project: &'a str,
+    org: &'a str,
+    apps: usize,
+    addons: usize,
+    network_groups: usize,
+    issues: Vec<String>,
 }
 
 /// Every `dependencies` entry of every app must reference an existing
