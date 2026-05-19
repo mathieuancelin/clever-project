@@ -13,6 +13,44 @@ use crate::interpolate::Resolver;
 static SECRET_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{secrets\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap());
 
+/// Valid values for `app.kind`, as accepted by `clever create --type`.
+/// See https://www.clever.cloud/developers/doc/.
+pub const ALLOWED_APP_KINDS: &[&str] = &[
+    "docker",
+    "dotnet",
+    "elixir",
+    "frankenphp",
+    "go",
+    "gradle",
+    "haskell",
+    "jar",
+    "linux",
+    "maven",
+    "meteor",
+    "node",
+    "php",
+    "play1",
+    "play2",
+    "python",
+    "ruby",
+    "rust",
+    "sbt",
+    "static",
+    "static-apache",
+    "v",
+    "war",
+];
+
+/// Lowercase + map common aliases to the canonical kind. `java` becomes
+/// `jar` (Clever reports java apps with `type: jar`).
+pub fn normalize_app_kind(kind: &str) -> String {
+    let lower = kind.to_lowercase();
+    match lower.as_str() {
+        "java" => "jar".to_string(),
+        _ => lower,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -194,8 +232,9 @@ impl Project {
 
         resolver.resolve_value(&mut value)?;
 
-        let project: Project = serde_yaml::from_value(value)
+        let mut project: Project = serde_yaml::from_value(value)
             .with_context(|| format!("deserializing project from `{}`", path.display()))?;
+        validate_and_normalize_app_kinds(&mut project)?;
         Ok((project, resolver))
     }
 
@@ -446,6 +485,24 @@ pub fn load_variables_file(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// Normalize each app's `kind` (lowercase + `java` → `jar`) and reject any
+/// kind that isn't in `ALLOWED_APP_KINDS`. We do this client-side so users
+/// see a clear error before any `clever` call goes out.
+fn validate_and_normalize_app_kinds(project: &mut Project) -> Result<()> {
+    for (key, app) in project.apps.iter_mut() {
+        let normalized = normalize_app_kind(&app.kind);
+        if !ALLOWED_APP_KINDS.contains(&normalized.as_str()) {
+            bail!(
+                "app `{key}` has unknown kind `{}`. Valid kinds: {} (or `java` as an alias for `jar`)",
+                app.kind,
+                ALLOWED_APP_KINDS.join(", ")
+            );
+        }
+        app.kind = normalized;
+    }
+    Ok(())
+}
+
 fn load_value(path: &Path) -> Result<Value> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading project file `{}`", path.display()))?;
@@ -561,6 +618,35 @@ addons:
         let p = write_tmp("yaml", bad);
         let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
         assert!(err.to_string().contains("missing"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn unknown_app_kind_is_rejected() {
+        let bad = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: cobol\n";
+        let p = write_tmp("yaml", bad);
+        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cobol"));
+        assert!(msg.contains("Valid kinds"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn java_alias_normalises_to_jar() {
+        let yaml = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: java\n";
+        let p = write_tmp("yaml", yaml);
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        assert_eq!(project.apps.get("a").unwrap().kind, "jar");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn kind_is_lowercased() {
+        let yaml = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: NODE\n";
+        let p = write_tmp("yaml", yaml);
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        assert_eq!(project.apps.get("a").unwrap().kind, "node");
         std::fs::remove_file(&p).ok();
     }
 
