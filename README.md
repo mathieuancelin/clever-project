@@ -347,4 +347,28 @@ The default `.gitignore` excludes `*.state` — it's a per-machine cache.
 ```sh
 cargo build
 cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
+
+CI runs all four on Linux, macOS and Windows on every push and pull request (`.github/workflows/ci.yml`).
+
+## Releasing
+
+Tag-driven. Pushing an annotated tag matching `v*.*.*` runs `.github/workflows/release.yml` which:
+
+1. Checks `Cargo.toml`'s `version` matches the tag and creates a GitHub Release (with auto-generated notes).
+2. Builds the binary across a matrix of targets in parallel (Linux x86_64 gnu+musl, Linux aarch64 gnu+musl, macOS x86_64+aarch64, Windows x86_64+aarch64) and uploads each archive to the release.
+3. Publishes to crates.io with `cargo publish --locked`.
+
+Setup:
+
+- Add `CARGO_REGISTRY_TOKEN` to the repo secrets (Settings → Secrets and variables → Actions). The publish job runs in a `crates-io` environment — create that environment if you want manual approval before publishing.
+- Cut a release:
+
+  ```sh
+  # 1. bump version in Cargo.toml, commit
+  # 2. tag and push
+  git tag -a v0.2.0 -m "v0.2.0"
+  git push origin v0.2.0
+  ```
