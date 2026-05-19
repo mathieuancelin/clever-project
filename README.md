@@ -7,6 +7,7 @@ clever-project apply project.yaml --env prod
 clever-project delete project.yaml --env staging --dry-run
 clever-project read --org orga_xxx --all -o project.yaml
 clever-project check project.yaml --offline
+clever-project status project.yaml
 ```
 
 ## Prerequisites
@@ -104,7 +105,7 @@ clever-project delete --env staging
 
 ### Project file lookup
 
-`apply`, `delete` and `check` take the project file as a positional argument. If you omit it, the CLI looks for one of these (in order) in the current working directory:
+`apply`, `delete`, `check` and `status` take the project file as a positional argument. If you omit it, the CLI looks for one of these (in order) in the current working directory:
 
 1. `project.clever.yaml`
 2. `project.clever.yml`
@@ -181,7 +182,71 @@ Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, 
 |---|---|
 | `--offline` | Skip steps 8 and 9 (live API). Static validation still runs. Useful when no `clever login` is available. |
 
-Exit code: 0 on success, non-zero on first detected issue.
+All problems are reported in a single pass — `check` keeps going after the first failure and aggregates everything into one error message:
+
+```
+Error: 3 validation problems:
+  - undefined variable `apikey2` (in `${apikey2}`)
+  - app `api` has unknown dependency `cellar1`: not a project key in `apps:` or `addons:`
+  - addon `db` has unknown size `xs_big` for provider `postgresql-addon`. Available sizes: ...
+```
+
+The walk only stops short on truly fatal parse failures (YAML/JSON syntax, missing `org` / `region`, mixed `variables:` shape). Everything past parsing — missing variables, missing secrets, unknown kinds, regions, sizes, duplicate names, broken dependencies, broken NG links — accumulates and surfaces together. Exit code: 0 on success, non-zero on the bundled error.
+
+### `status`
+
+Compare a project file against the live state of its Clever Cloud org and report any drift. Read-only — never mutates anything. Together with `check`, it's the "is the file still safe and accurate?" pair: `check` validates the file's internal consistency, `status` confirms reality still matches.
+
+```
+clever-project status [FILE] [OPTIONS]
+```
+
+Same variable/env flags as `check`. Plus:
+
+| Flag | Description |
+|---|---|
+| `--brief` | Hide resources that are perfectly in sync; only show drift |
+| `--exit-on-drift` | Exit code 1 if any drift, pending creation, or orphan is found. For CI checks. |
+
+For each app, addon, and network group, `status` prints one of four verdicts:
+
+- `= name` — in sync.
+- `~ name drifted` — present on both sides, but one or more fields differ. The differing fields are printed underneath.
+- `+ name only in file (would be created)` — declared but doesn't exist live.
+- `- name orphan (managed but missing from file)` — live and previously tracked in `<project>.state`, but no longer in the file. Apply would not touch it, `delete` would.
+
+Orphan detection is **state-aware**: only resources that were touched by `clever-project` on a previous run (i.e. recorded in the `.state` sidecar) are flagged. Resources that exist in the org but were created out-of-band aren't reported — `status` won't drown you in noise.
+
+Example output:
+
+```
+Status of project `My Project` in org `mlk` (default region `par`):
+
+  = app "prod-worker"
+  ~ app "prod-api" drifted
+      kind: "node" → "python"
+      env:
+        + NEW_KEY = "value"
+        - OLD_KEY = "old"  (only in org)
+        ~ PORT: "8080" → "3000"
+      domains:
+        + api.example.com
+        - legacy.example.com
+  + addon "prod-cache" only in file (would be created)
+  - app "legacy-worker" orphan (managed but missing from file)
+
+Summary: 1 drifted, 1 to create, 1 orphan, 1 in sync.
+```
+
+Scalar diffs are shown `"live" → "file"` so it reads "to converge, change live to match file." Set fields (`domains`, `dependencies`, NG members) use `+`/`-` per entry; map fields (`env`) use `+` (file-only), `-` (live-only), `~` (changed). Addon kind aliases (`postgresql` vs `postgresql-addon`, `cellar` vs `s3`, ...) and plan-slug casing (`S_BIG` vs `s_big`) are normalized before comparing, matching what `apply` would do — they never register as spurious drift.
+
+Compared fields:
+
+- **App**: `kind`, `region` (using the org's majority region as default), `source.from`, `domains`, `dependencies`, `env`.
+- **Addon**: `kind`, `region`, `size`.
+- **Network group**: members.
+
+Not compared (because `clever-tools` doesn't expose them in JSON read mode): `scalability`, `source.branch`, addon `version` / `backup_path` / `crypted`, app `config`.
 
 ### `read`
 
@@ -414,7 +479,7 @@ The default `.gitignore` excludes `*.state` — it's a per-machine cache.
 - **`apply` is full-replace.** Existing apps have their env vars, domains, scalability and service links overwritten to match the project file. Domains served by `*.cleverapps.io` are never removed (they're auto-managed by Clever).
 - **Addons aren't updated** if they already exist (plan, version, etc. stay as-is). Only their existence is reconciled.
 - **`clever config`** isn't supported — `clever-tools` doesn't expose it as JSON. The `config:` field is parsed but ignored on both `read` and `apply`.
-- **`scalability` on `read`** isn't populated — `clever scale` has no read mode. You'll need to add it manually if you read-bootstrap a project.
+- **`scalability` on `read` / `status`** isn't populated — `clever scale` has no read mode. `read` leaves it out; `status` skips it during drift comparison.
 - **`apply` is sequential** and stops at the first error (except on `delete`, which is best-effort and continues).
 - **Verbose logging**: pass `-v` / `--verbose` to see the underlying `clever` commands and per-step state lookups.
 
