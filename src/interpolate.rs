@@ -6,6 +6,8 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_yaml::Value;
 
+use crate::issues::{Issue, IssueSink};
+
 pub const RESERVED: &[&str] = &["env", "org", "region"];
 
 static VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -59,47 +61,67 @@ impl Resolver {
         self.vars.get(name).map(String::as_str)
     }
 
+    #[allow(dead_code)]
     pub fn resolve_string(&self, s: &str) -> Result<String> {
-        let mut missing: Option<String> = None;
+        let (out, missing) = self.resolve_string_inner(s);
+        if let Some(name) = missing.into_iter().next() {
+            return Err(anyhow!("undefined variable `{name}` (in `{s}`)"));
+        }
+        Ok(out)
+    }
+
+    /// Same as resolve_string but pushes one issue per missing variable and
+    /// returns the partially-resolved string (with missing references left as
+    /// empty). Use this when the caller wants to surface every problem in one
+    /// pass instead of bailing on the first one.
+    pub fn resolve_string_collecting(&self, s: &str, issues: &mut Vec<Issue>) -> String {
+        let (out, missing) = self.resolve_string_inner(s);
+        for name in missing {
+            issues.push_issue(format!("undefined variable `{name}` (in `{s}`)"));
+        }
+        out
+    }
+
+    /// Returns `(resolved, missing_names)`. The resolved string has missing
+    /// references replaced by empty so the walk can continue downstream.
+    fn resolve_string_inner(&self, s: &str) -> (String, Vec<String>) {
+        let mut missing: Vec<String> = Vec::new();
         let result = VAR_RE.replace_all(s, |caps: &regex::Captures| {
             let name = &caps[1];
             match self.vars.get(name) {
                 Some(v) => v.clone(),
                 None => {
-                    if missing.is_none() {
-                        missing = Some(name.to_string());
+                    if !missing.iter().any(|n| n == name) {
+                        missing.push(name.to_string());
                     }
                     String::new()
                 }
             }
         });
-        if let Some(name) = missing {
-            return Err(anyhow!("undefined variable `{name}` (in `{s}`)"));
-        }
-        Ok(result.into_owned())
+        (result.into_owned(), missing)
     }
 
     /// Walk a YAML value and replace `${name}` inside every string. Mapping
-    /// keys are left untouched.
-    pub fn resolve_value(&self, v: &mut Value) -> Result<()> {
+    /// keys are left untouched. Missing references are recorded in `issues`
+    /// and replaced by empty strings; the walk never aborts.
+    pub fn resolve_value(&self, v: &mut Value, issues: &mut Vec<Issue>) {
         match v {
             Value::String(s) => {
-                let resolved = self.resolve_string(s)?;
+                let resolved = self.resolve_string_collecting(s, issues);
                 *s = resolved;
             }
             Value::Sequence(seq) => {
                 for item in seq {
-                    self.resolve_value(item)?;
+                    self.resolve_value(item, issues);
                 }
             }
             Value::Mapping(map) => {
                 for (_, val) in map.iter_mut() {
-                    self.resolve_value(val)?;
+                    self.resolve_value(val, issues);
                 }
             }
             _ => {}
         }
-        Ok(())
     }
 }
 
@@ -182,9 +204,33 @@ mod tests {
         let r = r(&[("name", "world")], "o", "par");
         let mut v: Value =
             serde_yaml::from_str("greet: hello ${name}\nlist:\n  - ${name}\n  - other\n").unwrap();
-        r.resolve_value(&mut v).unwrap();
+        let mut issues = Vec::new();
+        r.resolve_value(&mut v, &mut issues);
+        assert!(issues.is_empty());
         let s = serde_yaml::to_string(&v).unwrap();
         assert!(s.contains("hello world"));
         assert!(s.contains("- world"));
+    }
+
+    #[test]
+    fn resolve_value_accumulates_missing_vars() {
+        let r = r(&[], "o", "par");
+        let mut v: Value = serde_yaml::from_str("a: ${x}\nb:\n  - ${y}\n  - ${z}\n").unwrap();
+        let mut issues = Vec::new();
+        r.resolve_value(&mut v, &mut issues);
+        assert_eq!(issues.len(), 3, "got: {issues:#?}");
+    }
+
+    #[test]
+    fn resolve_value_replaces_missing_with_empty() {
+        let r = r(&[("known", "ok")], "o", "par");
+        let mut v: Value =
+            serde_yaml::from_str("a: prefix-${unknown}-suffix\nb: ${known}").unwrap();
+        let mut issues = Vec::new();
+        r.resolve_value(&mut v, &mut issues);
+        assert_eq!(issues.len(), 1);
+        let s = serde_yaml::to_string(&v).unwrap();
+        assert!(s.contains("prefix--suffix"));
+        assert!(s.contains("ok"));
     }
 }
