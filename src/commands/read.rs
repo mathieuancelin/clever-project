@@ -154,7 +154,7 @@ pub fn run(args: ReadArgs) -> Result<()> {
         variables: IndexMap::new(),
         apps,
         addons,
-        network_groups: None,
+        network_groups: IndexMap::new(),
     };
 
     project
