@@ -13,7 +13,6 @@ clever-project read --org orga_xxx --all -o project.yaml
 - The official `clever-tools` CLI must be installed and on your `PATH`:
 
   ```sh
-  nvm use 24            # or any node >= 18
   npm i -g clever-tools
   clever login          # one-shot, opens the browser
   ```
