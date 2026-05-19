@@ -10,6 +10,7 @@ use crate::clever::{
 use crate::cli::ApplyArgs;
 use crate::commands::live::snapshot as live_snapshot;
 use crate::commands::plan as plan_mod;
+use crate::commands::prompt;
 use crate::commands::{OrgCache, resolve_project_file};
 use crate::issues::{self, Issue, IssueSink};
 use crate::model::{Addon, App, NetworkGroup, Project, Source};
@@ -84,19 +85,43 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     }
 
     // Structured plan output: snapshot the live org, compute a per-resource
-    // diff against the project file, and print the result. In --dry-run we
-    // stop here (no mutations). In real apply mode we print the plan as a
-    // header and proceed with the phases.
+    // diff against the project file, and print the result. Always printed,
+    // so the user (and `--dry-run`) see exactly what apply will do before
+    // it touches anything.
+    let live = live_snapshot(&clever, &project.org)
+        .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
+    let plan = plan_mod::compute(&project, &live);
+    print!("{}", plan_mod::render(&plan, &project));
+
     if args.dry_run {
-        let live = live_snapshot(&clever, &project.org)
-            .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
-        let plan = plan_mod::compute(&project, &live);
-        print!("{}", plan_mod::render(&plan, &project));
         info!(
             "dry-run: {} mutation(s) would be applied",
             plan.mutation_count()
         );
         return Ok(());
+    }
+
+    // Confirmation gate. Skip when there's nothing to do, when --yes was
+    // passed, or when stdin isn't a TTY (in which case we fail loud and
+    // tell the user to pass --yes).
+    if plan.mutation_count() == 0 {
+        info!("nothing to do — everything is already in sync");
+        return Ok(());
+    }
+    if !args.yes {
+        if !prompt::stdin_is_tty() {
+            bail!(
+                "stdin is not a TTY and --yes was not given; pass --yes (or --auto-approve) to run apply non-interactively"
+            );
+        }
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        let approved = prompt::ask_yes_no("\nApply these changes", false, &mut stdin, &mut stdout)?;
+        if !approved {
+            bail!("aborted by user");
+        }
     }
 
     let mut state = State::load(&file)?;
