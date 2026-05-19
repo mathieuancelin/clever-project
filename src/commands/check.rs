@@ -7,6 +7,7 @@ use crate::clever::Clever;
 use crate::cli::CheckArgs;
 use crate::commands::apply::{validate_addons, validate_app_scaling};
 use crate::commands::resolve_project_file;
+use crate::issues::{self, Issue, IssueSink};
 use crate::model::Project;
 
 /// Validate a project file end-to-end without contacting Clever Cloud for
@@ -39,10 +40,12 @@ pub fn run(args: CheckArgs) -> Result<()> {
     )
     .with_context(|| format!("loading project `{}`", file.display()))?;
 
+    let mut issues: Vec<Issue> = Vec::new();
+
     // 2. Static cross-resource checks.
-    validate_dependencies(&project)?;
-    validate_network_groups(&project)?;
-    validate_unique_names(&project)?;
+    validate_dependencies(&project, &mut issues);
+    validate_network_groups(&project, &mut issues);
+    validate_unique_names(&project, &mut issues);
 
     // 3. Optional live API validation (addons catalog + app flavors).
     if args.offline {
@@ -58,7 +61,7 @@ pub fn run(args: CheckArgs) -> Result<()> {
                         project.org
                     )
                 })?;
-            validate_addons(&mut project.addons, &providers)?;
+            validate_addons(&mut project.addons, &providers, &mut issues);
         }
         if project.apps.values().any(|a| {
             a.scalability
@@ -72,8 +75,12 @@ pub fn run(args: CheckArgs) -> Result<()> {
                     project.org
                 )
             })?;
-            validate_app_scaling(&mut project.apps, &instances)?;
+            validate_app_scaling(&mut project.apps, &instances, &mut issues);
         }
+    }
+
+    if !issues.is_empty() {
+        bail!("{}", issues::render(&issues));
     }
 
     info!(
@@ -86,83 +93,84 @@ pub fn run(args: CheckArgs) -> Result<()> {
 
 /// Every `dependencies` entry of every app must reference an existing
 /// project key (in `apps:` or `addons:`). Also rejects self-dependencies.
-fn validate_dependencies(project: &Project) -> Result<()> {
+fn validate_dependencies(project: &Project, issues: &mut Vec<Issue>) {
     for (app_key, app) in &project.apps {
         for dep_key in &app.dependencies {
             if dep_key == app_key {
-                bail!("app `{app_key}` lists itself as a dependency");
+                issues.push_issue(format!("app `{app_key}` lists itself as a dependency"));
+                continue;
             }
             let in_apps = project.apps.contains_key(dep_key);
             let in_addons = project.addons.contains_key(dep_key);
             if !in_apps && !in_addons {
-                bail!(
+                issues.push_issue(format!(
                     "app `{app_key}` has unknown dependency `{dep_key}`: not a project key in `apps:` or `addons:`"
-                );
+                ));
             }
         }
     }
-    Ok(())
 }
 
 /// Every `link:` entry in a network group must reference an existing
 /// project key (in `apps:` or `addons:`).
-fn validate_network_groups(project: &Project) -> Result<()> {
+fn validate_network_groups(project: &Project, issues: &mut Vec<Issue>) {
     for (ng_key, ng) in &project.network_groups {
         for dep_key in &ng.link {
             let in_apps = project.apps.contains_key(dep_key);
             let in_addons = project.addons.contains_key(dep_key);
             if !in_apps && !in_addons {
-                bail!(
+                issues.push_issue(format!(
                     "network group `{ng_key}` links unknown project key `{dep_key}`: not in `apps:` or `addons:`"
-                );
+                ));
             }
         }
     }
-    Ok(())
 }
 
 /// Resource names must be unique among apps, unique among addons, and unique
 /// among network groups. An app, an addon and an NG can share a name across
 /// types (they live in different Clever namespaces), but two of the same
 /// type sharing a name would clash on `name → id` lookups.
-fn validate_unique_names(project: &Project) -> Result<()> {
+fn validate_unique_names(project: &Project, issues: &mut Vec<Issue>) {
     let mut seen_apps: HashMap<&str, &str> = HashMap::new();
     for (key, app) in &project.apps {
         if app.name.trim().is_empty() {
-            bail!("app `{key}` has an empty `name`");
+            issues.push_issue(format!("app `{key}` has an empty `name`"));
+            continue;
         }
         if let Some(prev) = seen_apps.insert(&app.name, key) {
-            bail!(
+            issues.push_issue(format!(
                 "apps `{prev}` and `{key}` both resolve to the same name `{}`",
                 app.name
-            );
+            ));
         }
     }
     let mut seen_addons: HashMap<&str, &str> = HashMap::new();
     for (key, addon) in &project.addons {
         if addon.name.trim().is_empty() {
-            bail!("addon `{key}` has an empty `name`");
+            issues.push_issue(format!("addon `{key}` has an empty `name`"));
+            continue;
         }
         if let Some(prev) = seen_addons.insert(&addon.name, key) {
-            bail!(
+            issues.push_issue(format!(
                 "addons `{prev}` and `{key}` both resolve to the same name `{}`",
                 addon.name
-            );
+            ));
         }
     }
     let mut seen_ngs: HashMap<&str, &str> = HashMap::new();
     for (key, ng) in &project.network_groups {
         if ng.name.trim().is_empty() {
-            bail!("network group `{key}` has an empty `name`");
+            issues.push_issue(format!("network group `{key}` has an empty `name`"));
+            continue;
         }
         if let Some(prev) = seen_ngs.insert(&ng.name, key) {
-            bail!(
+            issues.push_issue(format!(
                 "network groups `{prev}` and `{key}` both resolve to the same name `{}`",
                 ng.name
-            );
+            ));
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -218,15 +226,28 @@ mod tests {
         }
     }
 
+    fn run_validator<F>(project: &Project, f: F) -> Vec<Issue>
+    where
+        F: FnOnce(&Project, &mut Vec<Issue>),
+    {
+        let mut issues = Vec::new();
+        f(project, &mut issues);
+        issues
+    }
+
     #[test]
     fn dependencies_must_reference_known_keys() {
         let mut project = make_project();
         let mut app = empty_app("api", "node");
         app.dependencies = vec!["does-not-exist".to_string()];
         project.apps.insert("api".to_string(), app);
-        let err = validate_dependencies(&project).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("unknown dependency `does-not-exist`"));
+        let issues = run_validator(&project, validate_dependencies);
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0]
+                .message
+                .contains("unknown dependency `does-not-exist`")
+        );
     }
 
     #[test]
@@ -235,9 +256,9 @@ mod tests {
         let mut app = empty_app("api", "node");
         app.dependencies = vec!["api".to_string()];
         project.apps.insert("api".to_string(), app);
-        let err = validate_dependencies(&project).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("itself"));
+        let issues = run_validator(&project, validate_dependencies);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("itself"));
     }
 
     #[test]
@@ -252,7 +273,8 @@ mod tests {
         project
             .addons
             .insert("db".to_string(), empty_addon("db", "postgresql"));
-        validate_dependencies(&project).unwrap();
+        let issues = run_validator(&project, validate_dependencies);
+        assert!(issues.is_empty());
     }
 
     #[test]
@@ -264,9 +286,9 @@ mod tests {
         project
             .apps
             .insert("b".to_string(), empty_app("same-name", "node"));
-        let err = validate_unique_names(&project).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("same-name"));
+        let issues = run_validator(&project, validate_unique_names);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("same-name"));
     }
 
     #[test]
@@ -278,9 +300,9 @@ mod tests {
         project
             .addons
             .insert("b".to_string(), empty_addon("the-db", "postgresql"));
-        let err = validate_unique_names(&project).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("the-db"));
+        let issues = run_validator(&project, validate_unique_names);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("the-db"));
     }
 
     #[test]
@@ -292,7 +314,8 @@ mod tests {
         project
             .addons
             .insert("d".to_string(), empty_addon("dual", "postgresql"));
-        validate_unique_names(&project).unwrap();
+        let issues = run_validator(&project, validate_unique_names);
+        assert!(issues.is_empty());
     }
 
     #[test]
@@ -304,9 +327,9 @@ mod tests {
         project
             .network_groups
             .insert("net".to_string(), empty_ng("vpn", &["api", "ghost"]));
-        let err = validate_network_groups(&project).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ghost"));
+        let issues = run_validator(&project, validate_network_groups);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("ghost"));
     }
 
     #[test]
@@ -321,7 +344,8 @@ mod tests {
         project
             .network_groups
             .insert("net".to_string(), empty_ng("vpn", &["api", "db"]));
-        validate_network_groups(&project).unwrap();
+        let issues = run_validator(&project, validate_network_groups);
+        assert!(issues.is_empty());
     }
 
     #[test]
@@ -333,17 +357,41 @@ mod tests {
         project
             .network_groups
             .insert("b".to_string(), empty_ng("dup", &[]));
-        let err = validate_unique_names(&project).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("dup"));
+        let issues = run_validator(&project, validate_unique_names);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("dup"));
     }
 
     #[test]
     fn empty_app_name_rejected() {
         let mut project = make_project();
         project.apps.insert("a".to_string(), empty_app("", "node"));
-        let err = validate_unique_names(&project).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("empty"));
+        let issues = run_validator(&project, validate_unique_names);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("empty"));
+    }
+
+    #[test]
+    fn multiple_issues_accumulate_in_one_pass() {
+        let mut project = make_project();
+        // app with a bad dep AND a self-dep
+        let mut api = empty_app("api", "node");
+        api.dependencies = vec!["api".to_string(), "ghost".to_string()];
+        project.apps.insert("api".to_string(), api);
+        // duplicate app name on a second app
+        project
+            .apps
+            .insert("api2".to_string(), empty_app("api", "node"));
+        // NG linking a non-existent key
+        project
+            .network_groups
+            .insert("net".to_string(), empty_ng("vpn", &["nowhere"]));
+
+        let mut issues = Vec::new();
+        validate_dependencies(&project, &mut issues);
+        validate_network_groups(&project, &mut issues);
+        validate_unique_names(&project, &mut issues);
+        // self-dep + unknown dep `ghost` + duplicate `api` name + NG bad link = 4
+        assert_eq!(issues.len(), 4, "got: {issues:#?}");
     }
 }
