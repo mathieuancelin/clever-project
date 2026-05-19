@@ -3,6 +3,7 @@ mod clever;
 mod commands;
 mod interpolate;
 mod model;
+mod state;
 
 use anyhow::Result;
 use clap::Parser;
