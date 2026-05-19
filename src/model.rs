@@ -333,8 +333,8 @@ fn read_secrets_file(path: &Path, required: bool) -> Result<IndexMap<String, Str
     }
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading secrets file `{}`", path.display()))?;
-    let value: Value = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parsing secrets file `{}`", path.display()))?;
+    let value = parse_yaml_or_json(&raw)
+        .with_context(|| format!("parsing secrets file `{}` (neither YAML nor JSON)", path.display()))?;
     let mapping = match value {
         Value::Mapping(m) => m,
         Value::Null => return Ok(IndexMap::new()),
@@ -359,6 +359,22 @@ fn read_secrets_file(path: &Path, required: bool) -> Result<IndexMap<String, Str
         out.insert(key, val);
     }
     Ok(out)
+}
+
+/// Try parsing `raw` as YAML, then as JSON; return the first successful one.
+/// JSON is technically a subset of YAML 1.2, so this is mostly a no-op in
+/// practice — but it lets us surface both parser errors when neither works,
+/// and makes the dual support explicit at the call site.
+fn parse_yaml_or_json(raw: &str) -> Result<Value> {
+    match serde_yaml::from_str::<Value>(raw) {
+        Ok(v) => Ok(v),
+        Err(yaml_err) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(jv) => serde_yaml::to_value(&jv).context("converting parsed JSON to YAML value"),
+            Err(json_err) => Err(anyhow!(
+                "could not parse as YAML or JSON\n  YAML error: {yaml_err}\n  JSON error: {json_err}"
+            )),
+        },
+    }
 }
 
 /// Expand `${secrets.X}` references inside the values of the project's
@@ -739,6 +755,35 @@ apps:
         .unwrap();
         assert_eq!(r.resolve_string("${foo}").unwrap(), "from-cli");
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn secrets_file_accepts_json_content() {
+        let project_path = write_named(
+            "j.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: ${secrets.apikey}\n    kind: node\n",
+        );
+        let dir = project_path.parent().unwrap();
+        // The file is named `.secrets` but contains JSON. Should still load.
+        std::fs::write(dir.join("j.secrets"), r#"{"apikey":"json-secret"}"#).unwrap();
+        let (project, _r) =
+            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+        assert_eq!(project.apps.get("a").unwrap().name, "json-secret");
+    }
+
+    #[test]
+    fn secrets_file_invalid_in_both_formats_errors() {
+        let project_path = write_named(
+            "bad.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: node\n",
+        );
+        let dir = project_path.parent().unwrap();
+        // Non-mapping at the root would also be rejected — but here let's
+        // craft something neither parser will accept (unbalanced braces).
+        std::fs::write(dir.join("bad.secrets"), "{ this is: not valid: in :: any format ]").unwrap();
+        let err = Project::load_and_resolve(&project_path, None, None, &[], None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("YAML") || msg.contains("JSON"));
     }
 
     #[test]
