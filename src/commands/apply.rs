@@ -736,7 +736,10 @@ fn sync_dependencies(
 /// and `max_size` against the live flavor catalog for that app's `kind`. The
 /// kind itself is matched against `instance.variant.slug` (after our load-time
 /// normalization, `kind` is already lowercased and `java`→`jar`).
-fn validate_app_scaling(apps: &mut IndexMap<String, App>, instances: &[AppInstance]) -> Result<()> {
+pub(crate) fn validate_app_scaling(
+    apps: &mut IndexMap<String, App>,
+    instances: &[AppInstance],
+) -> Result<()> {
     use std::collections::HashMap;
     let by_slug: HashMap<&str, &AppInstance> = instances
         .iter()
@@ -806,7 +809,7 @@ fn normalize_flavor(
 /// Validate every addon's `kind` and `size` against the live provider list
 /// returned by Clever's API. Normalizes the size casing to match the canonical
 /// slug from the API (so users can write `S_BIG` and we send `s_big`, etc.).
-fn validate_addons(
+pub(crate) fn validate_addons(
     addons: &mut IndexMap<String, Addon>,
     providers: &[AddonProvider],
 ) -> Result<()> {
