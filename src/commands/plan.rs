@@ -615,6 +615,9 @@ mod tests {
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
             default_region: "par".into(),
+            live_app_names: Default::default(),
+            live_addon_names: Default::default(),
+            live_ng_names: Default::default(),
         }
     }
 
