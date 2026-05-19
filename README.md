@@ -199,6 +199,7 @@ addons:
 - `region:` (root, per-app or per-addon) must be one of: `par`, `parhds`, `scw`, `grahds`, `ldn`, `mtl`, `rbx`, `rbxhds`, `sgp`, `syd`, `wsw`. Unknown regions are rejected at load time (this also applies to `--region` overrides).
 - Addon `kind:` accepts the short form (`postgresql`, `redis`, `cellar`, `matomo`, ...) and is mapped to the right Clever provider id (`postgresql-addon`, `redis-addon`, `cellar-addon`, `addon-matomo`, ...). Unknown values pass through unchanged.
 - Addon `kind`, `size`, and `region` are validated at the start of every `apply` against the live provider catalog returned by Clever's API (`clever curl /v2/products/addonproviders?orgaId=...`). Typos and unsupported combinations fail fast, before any mutation. Plan slug casing is normalized to the canonical value from the API (so `size: S_BIG` works even though Clever expects `s_big` for PostgreSQL). Skipped automatically when the project has no addons.
+- App `scalability.instances.minSize` / `maxSize` are validated at the start of every `apply` against the live instance catalog (`clever curl /v2/products/instances?for=...`). Unknown flavors are rejected with the list of valid sizes for that kind, and casing is normalized to Clever's canonical form (`s` → `S`, etc.). Skipped if no app declares a flavor.
 
 ## Variables
 
