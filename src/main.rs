@@ -17,6 +17,7 @@ fn main() -> Result<()> {
         cli::Command::Read(args) => commands::read::run(args),
         cli::Command::Apply(args) => commands::apply::run(args),
         cli::Command::Delete(args) => commands::delete::run(args),
+        cli::Command::Check(args) => commands::check::run(args),
     }
 }
 
