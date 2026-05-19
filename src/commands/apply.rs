@@ -63,9 +63,10 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     // Phase 2 — apps.
     let mut app_id_by_key: HashMap<String, String> = HashMap::new();
     let mut apps_to_link: Vec<(String, &App)> = Vec::new();
+    let mut outcomes: HashMap<String, AppOutcome> = HashMap::new();
 
     for (key, app) in &project.apps {
-        let id = handle_app(
+        let outcome = handle_app(
             &clever,
             &mut state,
             &mut cache,
@@ -74,60 +75,110 @@ pub fn run(args: ApplyArgs) -> Result<()> {
             key,
             app,
         )?;
-        app_id_by_key.insert(key.clone(), id);
+        app_id_by_key.insert(key.clone(), outcome.id.clone());
+        outcomes.insert(key.clone(), outcome);
         apps_to_link.push((key.clone(), app));
     }
 
-    // Phase 3 — service links. Wrapped in a one-shot retry: if anything
-    // fails (likely due to a stale id pulled from state), refresh state
-    // against fresh listings, rebuild the dep maps, and try again.
-    let phase3 = || -> Result<()> {
-        for (key, app) in &apps_to_link {
-            let app_id = &app_id_by_key[key];
-            sync_dependencies(
+    // Phase 3 — service links. Per-app `sync_dependencies` returns whether
+    // it changed anything; we feed that back into the per-app outcomes so
+    // we can decide on restarts in phase 4. Wrapped in a one-shot retry: if
+    // anything fails (likely due to a stale id pulled from state), refresh
+    // state against fresh listings, rebuild the dep maps, and try again.
+    let run_phase3 =
+        |clever: &Clever,
+         apps_to_link: &[(String, &App)],
+         app_id_by_key: &HashMap<String, String>,
+         addon_id_by_key: &HashMap<String, String>,
+         project: &Project|
+         -> Result<HashMap<String, bool>> {
+            let mut changed = HashMap::new();
+            for (key, app) in apps_to_link {
+                let app_id = &app_id_by_key[key];
+                let deps_changed = sync_dependencies(
+                    clever,
+                    app_id,
+                    &app.dependencies,
+                    app_id_by_key,
+                    addon_id_by_key,
+                    project,
+                )
+                .with_context(|| format!("syncing dependencies of app `{}`", app.name))?;
+                changed.insert(key.clone(), deps_changed);
+            }
+            Ok(changed)
+        };
+
+    let deps_changed_by_key: HashMap<String, bool> = match run_phase3(
+        &clever,
+        &apps_to_link,
+        &app_id_by_key,
+        &addon_id_by_key,
+        &project,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                "phase 3 (service links) failed: {e:#} — refreshing state against clever and retrying once"
+            );
+            refresh_dep_maps(
                 &clever,
-                app_id,
-                &app.dependencies,
+                &mut state,
+                &mut cache,
+                &project,
+                &effective_env,
+                &mut app_id_by_key,
+                &mut addon_id_by_key,
+            )?;
+            if !clever.is_dry_run() {
+                state
+                    .save()
+                    .with_context(|| format!("saving state file `{}`", state.path().display()))?;
+            }
+            // Sync the per-app outcome ids too — refresh may have rewritten them.
+            for (key, outcome) in outcomes.iter_mut() {
+                if let Some(new_id) = app_id_by_key.get(key) {
+                    if outcome.id != *new_id {
+                        outcome.id = new_id.clone();
+                    }
+                }
+            }
+            run_phase3(
+                &clever,
+                &apps_to_link,
                 &app_id_by_key,
                 &addon_id_by_key,
                 &project,
-            )
-            .with_context(|| format!("syncing dependencies of app `{}`", app.name))?;
+            )?
         }
-        Ok(())
     };
 
-    if let Err(e) = phase3() {
-        warn!(
-            "phase 3 (service links) failed: {e:#} — refreshing state against clever and retrying once"
-        );
-        refresh_dep_maps(
-            &clever,
-            &mut state,
-            &mut cache,
-            &project,
-            &effective_env,
-            &mut app_id_by_key,
-            &mut addon_id_by_key,
-        )?;
-        // Persist whatever the refresh learned, so the next run starts clean
-        // even if the retry below still fails.
-        if !clever.is_dry_run() {
-            state
-                .save()
-                .with_context(|| format!("saving state file `{}`", state.path().display()))?;
-        }
-        for (key, app) in &apps_to_link {
-            let app_id = &app_id_by_key[key];
-            sync_dependencies(
-                &clever,
-                app_id,
-                &app.dependencies,
-                &app_id_by_key,
-                &addon_id_by_key,
-                &project,
-            )
-            .with_context(|| format!("syncing dependencies of app `{}` (retry)", app.name))?;
+    // Phase 4 — restart apps where it matters.
+    //   - just created with github  → restart triggers the first deploy
+    //   - already existed and env or dependencies changed → restart
+    //   - created without github    → nothing to deploy yet, skip
+    for (key, _app) in &apps_to_link {
+        let outcome = &outcomes[key];
+        let deps_changed = *deps_changed_by_key.get(key).unwrap_or(&false);
+        let restart = if outcome.just_created {
+            outcome.created_with_github
+        } else {
+            outcome.env_changed || deps_changed
+        };
+        if restart {
+            let reason = if outcome.just_created {
+                "github source"
+            } else if outcome.env_changed && deps_changed {
+                "env + dependencies changed"
+            } else if outcome.env_changed {
+                "env changed"
+            } else {
+                "dependencies changed"
+            };
+            info!("restarting app `{}` ({}) — {reason}", _app.name, outcome.id);
+            clever
+                .restart(&outcome.id)
+                .with_context(|| format!("restarting app `{}`", _app.name))?;
         }
     }
 
@@ -221,6 +272,18 @@ fn handle_addon(
     Ok(id)
 }
 
+/// Outcome of bringing one app into the desired state.
+struct AppOutcome {
+    id: String,
+    /// True iff the app was just created in this run.
+    just_created: bool,
+    /// True iff the create used `--github` (i.e. clever knows where to pull
+    /// the code from). Only meaningful when `just_created` is true.
+    created_with_github: bool,
+    /// True iff the env vars were rewritten during this run.
+    env_changed: bool,
+}
+
 fn handle_app(
     clever: &Clever,
     state: &mut State,
@@ -229,7 +292,7 @@ fn handle_app(
     env: &str,
     key: &str,
     app: &App,
-) -> Result<String> {
+) -> Result<AppOutcome> {
     // State first. We validate the entry by running update_app — if any
     // call there fails (typically because the id no longer exists), drop
     // the state entry, invalidate the cache, and fall through to the
@@ -241,7 +304,14 @@ fn handle_app(
             app.name
         );
         match update_app(clever, &id, app) {
-            Ok(()) => return Ok(id),
+            Ok(env_changed) => {
+                return Ok(AppOutcome {
+                    id,
+                    just_created: false,
+                    created_with_github: false,
+                    env_changed,
+                });
+            }
             Err(e) => {
                 warn!(
                     "state hit for app `{}` (id={id}) but update failed: {e:#} — dropping stale state entry and refreshing from clever",
@@ -261,14 +331,24 @@ fn handle_app(
                 "app `{}` exists with kind `{}` but project declares `{}` — skipping update",
                 app.name, found.kind, app.kind
             );
-            return Ok(found.app_id);
+            return Ok(AppOutcome {
+                id: found.app_id,
+                just_created: false,
+                created_with_github: false,
+                env_changed: false,
+            });
         }
         if !source_matches(found.deploy_url.as_deref(), app.source.as_ref()) {
             warn!(
                 "app `{}` source diverges (clever: {:?}, project: {:?}) — skipping update",
                 app.name, found.deploy_url, app.source
             );
-            return Ok(found.app_id);
+            return Ok(AppOutcome {
+                id: found.app_id,
+                just_created: false,
+                created_with_github: false,
+                env_changed: false,
+            });
         }
         info!(
             "updating app `{}` ({}) [project key: {key}]",
@@ -284,8 +364,13 @@ fn handle_app(
                 name: app.name.clone(),
             });
         }
-        update_app(clever, &found.app_id, app)?;
-        return Ok(found.app_id);
+        let env_changed = update_app(clever, &found.app_id, app)?;
+        return Ok(AppOutcome {
+            id: found.app_id,
+            just_created: false,
+            created_with_github: false,
+            env_changed,
+        });
     }
 
     // Create.
@@ -319,8 +404,13 @@ fn handle_app(
             name: app.name.clone(),
         });
     }
-    update_app(clever, &id, app)?;
-    Ok(id)
+    let env_changed = update_app(clever, &id, app)?;
+    Ok(AppOutcome {
+        id,
+        just_created: true,
+        created_with_github: github.is_some(),
+        env_changed,
+    })
 }
 
 /// Force-refresh state against fresh clever listings: every project resource
@@ -460,9 +550,34 @@ fn parse_github(url: &str) -> Result<Option<String>> {
     Ok(Some(format!("{}/{}", parts[0], parts[1])))
 }
 
-fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<()> {
-    // env — full replace (also clears variables when env is empty).
-    clever.env_replace(app_id, &app.env)?;
+/// Apply the project's app config to a (real or synthetic) Clever app id.
+/// Returns whether the env vars actually changed, so the caller can decide
+/// to restart the app afterwards.
+fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<bool> {
+    // env — replace only if the desired set differs from what's already
+    // there. For freshly created (or synthetic dry-run) apps, the current
+    // env is empty/defaults, so any non-empty desired env counts as a
+    // change.
+    let env_changed = if is_synthetic(app_id) {
+        if !app.env.is_empty() {
+            clever.env_replace(app_id, &app.env)?;
+            true
+        } else {
+            false
+        }
+    } else {
+        let current: indexmap::IndexMap<String, String> = clever
+            .get_env(app_id)?
+            .into_iter()
+            .map(|v| (v.name, v.value))
+            .collect();
+        if !maps_equal(&current, &app.env) {
+            clever.env_replace(app_id, &app.env)?;
+            true
+        } else {
+            false
+        }
+    };
 
     // domains — diff against current state when we have a real app id;
     // for a freshly-created app (real or dry-run) just add the desired set.
@@ -494,13 +609,23 @@ fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<()> {
         clever.scale(app_id, scale)?;
     }
 
-    Ok(())
+    Ok(env_changed)
+}
+
+fn maps_equal(
+    a: &indexmap::IndexMap<String, String>,
+    b: &indexmap::IndexMap<String, String>,
+) -> bool {
+    a.len() == b.len() && a.iter().all(|(k, v)| b.get(k) == Some(v))
 }
 
 fn is_synthetic(id: &str) -> bool {
     id.starts_with("dry-run::")
 }
 
+/// Sync the linked services for one app. Returns whether at least one link
+/// or unlink call was made — so the caller knows whether a restart is in
+/// order.
 fn sync_dependencies(
     clever: &Clever,
     app_id: &str,
@@ -508,7 +633,7 @@ fn sync_dependencies(
     app_id_by_key: &HashMap<String, String>,
     addon_id_by_key: &HashMap<String, String>,
     project: &Project,
-) -> Result<()> {
+) -> Result<bool> {
     let mut desired_apps: HashSet<String> = HashSet::new();
     let mut desired_addons: HashSet<String> = HashSet::new();
     for dep_key in dependencies {
@@ -547,20 +672,25 @@ fn sync_dependencies(
         )
     };
 
+    let mut changed = false;
     for id in desired_addons.difference(&current_addons) {
         clever.link_addon(app_id, id)?;
+        changed = true;
     }
     for id in current_addons.difference(&desired_addons) {
         clever.unlink_addon(app_id, id)?;
+        changed = true;
     }
     for id in desired_apps.difference(&current_apps) {
         clever.link_app(app_id, id)?;
+        changed = true;
     }
     for id in current_apps.difference(&desired_apps) {
         clever.unlink_app(app_id, id)?;
+        changed = true;
     }
 
-    Ok(())
+    Ok(changed)
 }
 
 /// Map a user-friendly `kind` from the project file to the provider id
