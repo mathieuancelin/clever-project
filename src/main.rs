@@ -2,6 +2,7 @@ mod clever;
 mod cli;
 mod commands;
 mod interpolate;
+mod issues;
 mod model;
 mod state;
 
