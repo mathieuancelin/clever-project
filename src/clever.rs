@@ -7,11 +7,12 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use indexmap::IndexMap;
 use serde::Deserialize;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::model::Scalability;
 
@@ -20,10 +21,15 @@ pub fn ensure_available() -> Result<PathBuf> {
         .map_err(|_| anyhow!("`clever` not found in PATH. Install it via `npm i -g clever-tools`."))
 }
 
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_BACKOFF_BASE_MS: u64 = 500;
+
 #[derive(Debug)]
 pub struct Clever {
     program: PathBuf,
     dry_run: bool,
+    max_attempts: u32,
+    backoff_base_ms: u64,
 }
 
 impl Clever {
@@ -31,11 +37,20 @@ impl Clever {
         Ok(Self {
             program: ensure_available()?,
             dry_run: false,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            backoff_base_ms: DEFAULT_BACKOFF_BASE_MS,
         })
     }
 
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_retry(mut self, max_attempts: u32, backoff_base_ms: u64) -> Self {
+        self.max_attempts = max_attempts.max(1);
+        self.backoff_base_ms = backoff_base_ms;
         self
     }
 
@@ -57,6 +72,11 @@ impl Clever {
     }
 
     fn run_capture(&self, args: &[&str]) -> Result<Vec<u8>> {
+        let label = args.join(" ");
+        self.retry(&label, || self.run_capture_once(args))
+    }
+
+    fn run_capture_once(&self, args: &[&str]) -> Result<Vec<u8>> {
         info!("clever {}", args.join(" "));
         let output = Command::new(&self.program)
             .args(args)
@@ -75,6 +95,66 @@ impl Clever {
         }
         debug!("stdout: {}", String::from_utf8_lossy(&output.stdout).trim());
         Ok(output.stdout)
+    }
+
+    fn run_with_stdin(&self, args: &[&str], stdin_payload: &[u8]) -> Result<Vec<u8>> {
+        let label = args.join(" ");
+        self.retry(&label, || self.run_with_stdin_once(args, stdin_payload))
+    }
+
+    fn run_with_stdin_once(&self, args: &[&str], stdin_payload: &[u8]) -> Result<Vec<u8>> {
+        info!("clever {}", args.join(" "));
+        let mut child = Command::new(&self.program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawning `clever {}`", args.join(" ")))?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("no stdin handle on `clever {}`", args.join(" ")))?
+            .write_all(stdin_payload)
+            .with_context(|| format!("writing stdin to `clever {}`", args.join(" ")))?;
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("waiting for `clever {}`", args.join(" ")))?;
+        if !output.status.success() {
+            bail!(
+                "`clever {}` failed (status {}):\nstderr: {}\nstdout: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+        }
+        Ok(output.stdout)
+    }
+
+    fn retry<F, T>(&self, label: &str, mut op: F) -> Result<T>
+    where
+        F: FnMut() -> Result<T>,
+    {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match op() {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if attempt >= self.max_attempts || !is_transient_error(&msg) {
+                        return Err(e);
+                    }
+                    let delay = backoff_delay(self.backoff_base_ms, attempt);
+                    warn!(
+                        "transient error on `clever {label}` (attempt {attempt}/{}): {e:#} — retrying in {:?}",
+                        self.max_attempts, delay
+                    );
+                    std::thread::sleep(delay);
+                }
+            }
+        }
     }
 
     // -------- read side --------
@@ -169,7 +249,18 @@ impl Clever {
             args.push("--github");
             args.push(g);
         }
-        self.run(&args)?;
+        // A name conflict here means either a true race, or a retry whose
+        // previous attempt succeeded server-side but lost the response. In
+        // both cases the resource exists and the lookup below resolves it.
+        if let Err(e) = self.run(&args) {
+            if !is_name_conflict(&format!("{e:#}")) {
+                return Err(e);
+            }
+            warn!(
+                "`clever create` for app `{}` reported a name conflict — resolving via listing",
+                params.name
+            );
+        }
 
         let apps = self.list_apps(params.org)?;
         apps.into_iter()
@@ -237,7 +328,15 @@ impl Clever {
             args.push(o);
         }
 
-        self.run(&args)?;
+        if let Err(e) = self.run(&args) {
+            if !is_name_conflict(&format!("{e:#}")) {
+                return Err(e);
+            }
+            warn!(
+                "`clever addon create` for `{}` reported a name conflict — resolving via listing",
+                params.name
+            );
+        }
 
         let addons = self.list_addons(params.org)?;
         addons
@@ -287,29 +386,7 @@ impl Clever {
             app,
             env.len()
         );
-        let mut child = Command::new(&self.program)
-            .args(["env", "import", "--app", app, "--json"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawning `clever env import`")?;
-        child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("no stdin handle on `clever env import`"))?
-            .write_all(&body)
-            .context("writing env payload to `clever env import` stdin")?;
-        let output = child
-            .wait_with_output()
-            .context("waiting for `clever env import`")?;
-        if !output.status.success() {
-            bail!(
-                "`clever env import` failed (status {}):\nstderr: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        self.run_with_stdin(&["env", "import", "--app", app, "--json"], &body)?;
         Ok(())
     }
 
@@ -447,7 +524,15 @@ impl Clever {
             args.push("--link");
             args.push(&members_csv);
         }
-        self.run(&args)?;
+        if let Err(e) = self.run(&args) {
+            if !is_name_conflict(&format!("{e:#}")) {
+                return Err(e);
+            }
+            warn!(
+                "`clever ng create` for `{}` reported a name conflict — resolving via listing",
+                params.label
+            );
+        }
         let ngs = self.list_network_groups(params.org)?;
         ngs.into_iter()
             .find(|n| n.label == params.label)
@@ -478,6 +563,49 @@ impl Clever {
         }
         self.run(&["ng", "unlink", member_id, ng_id_or_label, "--org", org])
     }
+}
+
+fn is_transient_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    const PATTERNS: &[&str] = &[
+        "etimedout",
+        "econnreset",
+        "econnrefused",
+        "ehostunreach",
+        "enotfound",
+        "eai_again",
+        "socket hang up",
+        "network error",
+        "fetch failed",
+        "request timeout",
+        "rate limit",
+        "too many requests",
+        " 429",
+        " 500",
+        " 502",
+        " 503",
+        " 504",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "internal server error",
+    ];
+    PATTERNS.iter().any(|p| m.contains(p))
+}
+
+fn is_name_conflict(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("already exists") || m.contains("already taken") || m.contains("name is taken")
+}
+
+fn backoff_delay(base_ms: u64, attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    let exp = base_ms.saturating_mul(1u64 << shift);
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.subsec_nanos() % 200) as u64)
+        .unwrap_or(0);
+    Duration::from_millis(exp.saturating_add(jitter))
 }
 
 #[derive(Debug)]
@@ -644,4 +772,62 @@ pub struct AppInstanceVariant {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppFlavor {
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_patterns_detected() {
+        assert!(is_transient_error("ETIMEDOUT"));
+        assert!(is_transient_error("connection failed: ECONNRESET"));
+        assert!(is_transient_error("fetch failed"));
+        assert!(is_transient_error("socket hang up"));
+        assert!(is_transient_error("HTTP 503 Service Unavailable"));
+        assert!(is_transient_error("got 429 Too Many Requests"));
+        assert!(is_transient_error("Internal Server Error"));
+        assert!(is_transient_error("Bad Gateway"));
+    }
+
+    #[test]
+    fn permanent_patterns_not_retried() {
+        assert!(!is_transient_error("not found"));
+        assert!(!is_transient_error("404"));
+        assert!(!is_transient_error("invalid plan"));
+        assert!(!is_transient_error("already exists"));
+        assert!(!is_transient_error("forbidden"));
+        assert!(!is_transient_error("validation failed"));
+    }
+
+    #[test]
+    fn name_conflict_detected() {
+        assert!(is_name_conflict("an app with name `foo` already exists"));
+        assert!(is_name_conflict("Name is already taken"));
+        assert!(is_name_conflict("This name is taken"));
+    }
+
+    #[test]
+    fn name_conflict_does_not_false_positive() {
+        assert!(!is_name_conflict("not found"));
+        assert!(!is_name_conflict("ETIMEDOUT"));
+        assert!(!is_name_conflict("invalid plan"));
+    }
+
+    #[test]
+    fn backoff_grows_with_attempts() {
+        let d1 = backoff_delay(100, 1);
+        let d2 = backoff_delay(100, 2);
+        let d3 = backoff_delay(100, 3);
+        // d1 ~ 100ms, d2 ~ 200ms, d3 ~ 400ms (plus jitter < 200ms each)
+        assert!(d1.as_millis() >= 100 && d1.as_millis() < 300);
+        assert!(d2.as_millis() >= 200 && d2.as_millis() < 400);
+        assert!(d3.as_millis() >= 400 && d3.as_millis() < 600);
+    }
+
+    #[test]
+    fn backoff_caps_shift() {
+        // Even at large attempts, the shift is capped so we don't overflow.
+        let _ = backoff_delay(100, 100);
+    }
 }
