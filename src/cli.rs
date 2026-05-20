@@ -50,6 +50,9 @@ pub enum Command {
     /// Remove a stale state lock file. Use this when a previous `apply` or
     /// `delete` was killed (Ctrl+C, crash, kill -9) and left a lock behind.
     Unlock(UnlockArgs),
+    /// Print a shell completion script to stdout. Redirect into the right
+    /// location for your shell (see `clever-project completions --help`).
+    Completions(CompletionsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -359,6 +362,13 @@ pub struct InitArgs {
     /// `--non-interactive`.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Target shell (bash, zsh, fish, elvish, powershell).
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Args)]
