@@ -104,6 +104,12 @@ fn state_path_for(project_path: &Path) -> PathBuf {
     project_path.with_extension("state")
 }
 
+/// Public accessor for the state file path derived from a project file. Used
+/// by `unlock` to locate the lock sentinel without having to load the state.
+pub fn state_path_for_project(project_path: &Path) -> PathBuf {
+    state_path_for(project_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
