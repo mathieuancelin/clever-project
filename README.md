@@ -253,7 +253,7 @@ Options:
 | `--region <REGION>` | Override the default `region` |
 | `--env <VALUE>` | Set `${env}` (default `prod`) |
 | `--variable key=value` | One-off variable override (repeatable) |
-| `--variable-path <FILE>` | Load variable overrides from a YAML/JSON file (repeatable) |
+| `--variables-file-path <FILE>` | Load variable overrides from a YAML/JSON file (repeatable) |
 | `--secrets-path <FILE>` | Explicit secrets file (otherwise auto-discovered, see below) |
 | `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
 | `--yes` / `--auto-approve` | Skip the confirmation prompt. Required when stdin is not a TTY. |
@@ -372,7 +372,7 @@ clever-project check [FILE] [OPTIONS]
 Runs, in order:
 
 1. **YAML/JSON syntax** and project schema parsing.
-2. **Variable interpolation** — every `${...}` reference must resolve. Catches typos, missing entries in `variables:`, `--variable-path`, `--variable`, or in the active `.secrets` file.
+2. **Variable interpolation** — every `${...}` reference must resolve. Catches typos, missing entries in `variables:`, `--variables-file-path`, `--variable`, or in the active `.secrets` file.
 3. **App `kind`** — must be one of the supported types (case-insensitive, `java` alias accepted).
 4. **Region** — root, per-app, per-addon, plus `--region` override.
 5. **Dependencies** — every `dependencies:` entry must be a project key under `apps:` or `addons:`; self-dependencies are rejected.
@@ -381,7 +381,7 @@ Runs, in order:
 8. **Addon catalog (live API)** — addon `kind`, `size`, and per-addon `region` are checked against the live `clever curl /v2/products/addonproviders`.
 9. **App flavor catalog (live API)** — `scalability.instances.minSize` / `maxSize` are checked against `clever curl /v2/products/instances`.
 
-Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variable-path`, `--secrets-path`). Plus:
+Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variables-file-path`, `--secrets-path`). Plus:
 
 | Flag | Description |
 |---|---|
@@ -590,8 +590,8 @@ apikey = "from-file"
 ```
 
 ```sh
-clever-project apply project.clever.yaml --variable-path vars.yaml
-clever-project apply project.clever.toml --variable-path vars.toml
+clever-project apply project.clever.yaml --variables-file-path vars.yaml
+clever-project apply project.clever.toml --variables-file-path vars.toml
 ```
 
 The flag is repeatable; later files override earlier ones.
@@ -599,7 +599,7 @@ The flag is repeatable; later files override earlier ones.
 ### Precedence (low → high)
 
 1. Project file `variables:` section (group merged with `common` if per-env form)
-2. `--variable-path FILE` entries (in order; later files win)
+2. `--variables-file-path FILE` entries (in order; later files win)
 3. `--variable foo=bar` entries
 4. `--env <value>` for the special `${env}` variable
 
