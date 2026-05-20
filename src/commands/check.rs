@@ -20,7 +20,7 @@ pub fn run(args: CheckArgs) -> Result<()> {
     for path in &args.variable_paths {
         variables.extend(
             crate::model::load_variables_file(path)
-                .with_context(|| format!("loading --variable-path `{}`", path.display()))?,
+                .with_context(|| format!("loading --variables-file-path `{}`", path.display()))?,
         );
     }
     variables.extend(args.variables);
