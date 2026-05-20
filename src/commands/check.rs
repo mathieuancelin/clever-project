@@ -226,6 +226,7 @@ mod tests {
             source: None,
             domains: vec![],
             scalability: None,
+            build: None,
             dependencies: vec![],
             config: IndexMap::new(),
             env: IndexMap::new(),
