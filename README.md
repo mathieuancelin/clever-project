@@ -259,6 +259,7 @@ Options:
 | `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
 | `--yes` / `--auto-approve` | Skip the confirmation prompt. Required when stdin is not a TTY. |
 | `--target <SPEC>` | Restrict the run to one resource (repeatable). Syntax: `apps.KEY`, `addons.KEY`, `network_groups.KEY` (also `app.`, `addon.`, `ng.`). |
+| `--skip-hooks` | Bypass every `pre_*` / `post_*` hook for this run (see [Hooks](#hooks)). |
 | `-v, --verbose` | More log lines (`debug` level) |
 
 Apps with a GitHub `source.from` are created with `clever create --github owner/repo`. Non-GitHub sources create an empty app — push your code to the Clever remote yourself afterwards.
@@ -690,6 +691,60 @@ apps:
 ```
 
 The default `.gitignore` excludes `*.secrets` — keep it that way.
+
+## Hooks
+
+Pre / post hooks let you orchestrate external steps (builds, DB migrations, Slack notifications, DNS updates) around `apply` and `delete` without a custom wrapper. Declared in the project file at the project root or per-app:
+
+```yaml
+hooks:
+  pre_apply:   ./scripts/build-all.sh
+  post_apply:  ./scripts/notify-deploy.sh
+
+apps:
+  api:
+    name: ${env}-api
+    kind: node
+    hooks:
+      pre_apply:   npm ci && npm run build
+      post_apply:  ./scripts/run-migrations.sh
+      pre_delete:  ./scripts/backup-data.sh
+      post_delete: ./scripts/notify-teardown.sh
+```
+
+### Available events
+
+- `pre_apply` — runs before any mutation during `apply`
+- `post_apply` — runs after `apply` finishes successfully
+- `pre_delete` — runs before any deletion during `delete`
+- `post_delete` — runs after `delete` finishes
+
+### Execution model
+
+- **Order:** project `pre_apply` → each targeted app's `pre_apply` (project file order) → mutation phases → each targeted app's `post_apply` → project `post_apply`. Symmetric for delete.
+- **Failure:** pre-hook failure aborts the run before any mutation; post-hook failure surfaces as a non-zero exit even though the mutations already landed (no rollback).
+- **Targets:** with `--target apps.api`, only `api`'s app-level hooks fire. Project-level hooks always fire.
+- **Shell:** commands are run through `sh -c '<command>'` on Unix and `cmd /C '<command>'` on Windows, so pipes, `&&`, redirects and env-var expansion work as expected.
+- **Working directory:** the directory containing the project file. Relative paths like `./scripts/build.sh` resolve against it.
+- **Stdout / stderr:** inherited from the parent process — you see hook output live.
+- **Dry-run:** hooks don't fire in `--dry-run` mode (they're not part of the plan).
+- **Skip:** `--skip-hooks` bypasses every hook for one run.
+
+### Environment variables exposed to hooks
+
+| Variable | Meaning |
+|---|---|
+| `CLEVER_PROJECT_FILE` | Absolute path to the project file |
+| `CLEVER_PROJECT_ORG` | Org id |
+| `CLEVER_PROJECT_REGION` | Default region |
+| `CLEVER_PROJECT_ENV` | Active `${env}` value |
+| `CLEVER_PROJECT_OPERATION` | `apply` or `delete` |
+| `CLEVER_PROJECT_PHASE` | `pre` or `post` |
+| `CLEVER_PROJECT_APP_KEY` | App key in the project file (per-app hooks only) |
+| `CLEVER_PROJECT_APP_NAME` | Resolved app name (per-app hooks only) |
+| `CLEVER_PROJECT_APP_KIND` | App kind (per-app hooks only) |
+
+Secrets and per-app env vars are not injected — read them from the secrets/env file directly if a hook needs them.
 
 ## State file
 
