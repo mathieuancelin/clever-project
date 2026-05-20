@@ -24,6 +24,7 @@ fn main() -> Result<()> {
         cli::Command::Status(args) => commands::status::run(args),
         cli::Command::Init(args) => commands::init::run(args),
         cli::Command::Unlock(args) => commands::unlock::run(args),
+        cli::Command::Completions(args) => commands::completions::run(args),
     }
 }
 
@@ -36,6 +37,9 @@ fn command_format(cmd: &cli::Command) -> cli::OutputFormat {
         cli::Command::Status(a) => a.format,
         cli::Command::Init(a) => a.format,
         cli::Command::Unlock(a) => a.format,
+        // The completions command writes a raw shell script to stdout; keep
+        // logs quiet by treating it as JSON-mode (warn level only).
+        cli::Command::Completions(_) => cli::OutputFormat::Json,
     }
 }
 
