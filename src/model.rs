@@ -194,9 +194,16 @@ impl Project {
         region_override: Option<String>,
         cli_vars: &[(String, String)],
         secrets_path: Option<&Path>,
+        cli_secrets: &[(String, String)],
     ) -> Result<(Self, Resolver)> {
-        let (project, resolver, issues) =
-            load_inner(path, org_override, region_override, cli_vars, secrets_path)?;
+        let (project, resolver, issues) = load_inner(
+            path,
+            org_override,
+            region_override,
+            cli_vars,
+            secrets_path,
+            cli_secrets,
+        )?;
         if !issues.is_empty() {
             bail!("{}", issues::render(&issues));
         }
@@ -215,9 +222,16 @@ impl Project {
         region_override: Option<String>,
         cli_vars: &[(String, String)],
         secrets_path: Option<&Path>,
+        cli_secrets: &[(String, String)],
     ) -> Result<(Self, Vec<Issue>)> {
-        let (project, _resolver, issues) =
-            load_inner(path, org_override, region_override, cli_vars, secrets_path)?;
+        let (project, _resolver, issues) = load_inner(
+            path,
+            org_override,
+            region_override,
+            cli_vars,
+            secrets_path,
+            cli_secrets,
+        )?;
         Ok((project, issues))
     }
 
@@ -244,6 +258,7 @@ fn load_inner(
     region_override: Option<String>,
     cli_vars: &[(String, String)],
     secrets_path: Option<&Path>,
+    cli_secrets: &[(String, String)],
 ) -> Result<(Project, Resolver, Vec<Issue>)> {
     let mut issues: Vec<Issue> = Vec::new();
 
@@ -278,7 +293,7 @@ fn load_inner(
         .map(|(_, v)| v.clone())
         .unwrap_or_else(|| "prod".to_string());
 
-    let secrets = load_secrets(path, &effective_env, secrets_path)?;
+    let secrets = load_secrets(path, &effective_env, secrets_path, cli_secrets)?;
 
     let raw_variables = map
         .remove(Value::String("variables".into()))
@@ -395,32 +410,40 @@ fn load_secrets(
     project_path: &Path,
     env: &str,
     explicit: Option<&Path>,
+    cli_secrets: &[(String, String)],
 ) -> Result<IndexMap<String, String>> {
-    if let Some(p) = explicit {
-        return read_secrets_file(p, /* required */ true);
-    }
+    let mut out = if let Some(p) = explicit {
+        read_secrets_file(p, /* required */ true)?
+    } else {
+        let mut out = IndexMap::new();
+        let stem = project_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let dir = project_path.parent().unwrap_or(Path::new("."));
+        if !stem.is_empty() {
+            let default_path = dir.join(format!("{stem}.secrets"));
+            if default_path.exists() {
+                debug!("loading secrets from `{}`", default_path.display());
+                for (k, v) in read_secrets_file(&default_path, false)? {
+                    out.insert(k, v);
+                }
+            }
+            let env_path = dir.join(format!("{stem}.{env}.secrets"));
+            if env_path.exists() {
+                debug!("loading env-specific secrets from `{}`", env_path.display());
+                for (k, v) in read_secrets_file(&env_path, false)? {
+                    out.insert(k, v);
+                }
+            }
+        }
+        out
+    };
 
-    let mut out = IndexMap::new();
-    let stem = project_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let dir = project_path.parent().unwrap_or(Path::new("."));
-    if !stem.is_empty() {
-        let default_path = dir.join(format!("{stem}.secrets"));
-        if default_path.exists() {
-            debug!("loading secrets from `{}`", default_path.display());
-            for (k, v) in read_secrets_file(&default_path, false)? {
-                out.insert(k, v);
-            }
-        }
-        let env_path = dir.join(format!("{stem}.{env}.secrets"));
-        if env_path.exists() {
-            debug!("loading env-specific secrets from `{}`", env_path.display());
-            for (k, v) in read_secrets_file(&env_path, false)? {
-                out.insert(k, v);
-            }
-        }
+    // `--secret key=value` overrides win over everything loaded from disk,
+    // matching `--variable` / `--variables-file-path` semantics.
+    for (k, v) in cli_secrets {
+        out.insert(k.clone(), v.clone());
     }
     Ok(out)
 }
@@ -709,7 +732,7 @@ addons:
     fn loads_and_resolves_spec_sample() {
         let p = write_tmp("yaml", SAMPLE);
         let (project, _r) =
-            Project::load_and_resolve(&p, None, None, &[], None).expect("load failed");
+            Project::load_and_resolve(&p, None, None, &[], None, &[]).expect("load failed");
         assert_eq!(project.name, "My Project");
         assert_eq!(project.org, "orga_orga-clevercloud-cible");
         assert_eq!(project.region, "par");
@@ -729,6 +752,7 @@ addons:
             Some("rbx".into()),
             &[("env".to_string(), "staging".to_string())],
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(project.org, "override_org");
@@ -741,7 +765,7 @@ addons:
     fn missing_var_propagates() {
         let bad = "name: x\norg: o\nregion: r\napps:\n  a:\n    name: ${missing}\n    kind: node\n";
         let p = write_tmp("yaml", bad);
-        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
         assert!(err.to_string().contains("missing"));
         std::fs::remove_file(&p).ok();
     }
@@ -750,7 +774,7 @@ addons:
     fn unknown_root_region_is_rejected() {
         let bad = "name: P\norg: o\nregion: atlantis\napps: {}\n";
         let p = write_tmp("yaml", bad);
-        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("atlantis"));
         assert!(msg.contains("Valid regions"));
@@ -761,7 +785,7 @@ addons:
     fn unknown_app_region_is_rejected() {
         let bad = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: node\n    region: zzz\n";
         let p = write_tmp("yaml", bad);
-        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("app `a`"));
         assert!(msg.contains("zzz"));
@@ -773,7 +797,7 @@ addons:
         // bad root region + bad app kind + bad app region: 3 problems
         let bad = "name: P\norg: o\nregion: atlantis\napps:\n  a:\n    name: x\n    kind: cobol\n    region: zzz\n";
         let p = write_tmp("yaml", bad);
-        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("3 validation problems"), "got: {msg}");
         assert!(msg.contains("atlantis"));
@@ -786,7 +810,7 @@ addons:
     fn unknown_addon_region_is_rejected() {
         let bad = "name: P\norg: o\nregion: par\napps: {}\naddons:\n  db:\n    name: x\n    kind: postgresql\n    region: nope\n";
         let p = write_tmp("yaml", bad);
-        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("addon `db`"));
         assert!(msg.contains("nope"));
@@ -797,8 +821,8 @@ addons:
     fn cli_region_override_is_validated() {
         let yaml = "name: P\norg: o\nregion: par\napps: {}\n";
         let p = write_tmp("yaml", yaml);
-        let err =
-            Project::load_and_resolve(&p, None, Some("mars".to_string()), &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, Some("mars".to_string()), &[], None, &[])
+            .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("mars"));
         std::fs::remove_file(&p).ok();
@@ -808,7 +832,7 @@ addons:
     fn unknown_app_kind_is_rejected() {
         let bad = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: cobol\n";
         let p = write_tmp("yaml", bad);
-        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("cobol"));
         assert!(msg.contains("Valid kinds"));
@@ -819,7 +843,7 @@ addons:
     fn java_alias_normalises_to_jar() {
         let yaml = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: java\n";
         let p = write_tmp("yaml", yaml);
-        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
         assert_eq!(project.apps.get("a").unwrap().kind, "jar");
         std::fs::remove_file(&p).ok();
     }
@@ -828,7 +852,7 @@ addons:
     fn kind_is_lowercased() {
         let yaml = "name: P\norg: o\nregion: par\napps:\n  a:\n    name: x\n    kind: NODE\n";
         let p = write_tmp("yaml", yaml);
-        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
         assert_eq!(project.apps.get("a").unwrap().kind, "node");
         std::fs::remove_file(&p).ok();
     }
@@ -837,7 +861,7 @@ addons:
     fn json_format_works_too() {
         let json = r#"{"name":"P","org":"o","region":"par","apps":{"a":{"name":"${env}-app","kind":"node"}}}"#;
         let p = write_tmp("json", json);
-        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "prod-app");
         std::fs::remove_file(&p).ok();
     }
@@ -863,7 +887,7 @@ kind = "postgresql"
 size = "xs_sml"
 "#;
         let p = write_tmp("toml", toml);
-        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
         assert_eq!(project.name, "P");
         assert_eq!(project.org, "o");
         let app = project.apps.get("a").unwrap();
@@ -936,7 +960,7 @@ size = "xs_sml"
         ));
         project.save(&p).unwrap();
         // Round-trip through load_and_resolve (it interpolates so use no ${...}).
-        let (reloaded, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        let (reloaded, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
         assert_eq!(reloaded.name, "Round trip");
         assert_eq!(reloaded.org, "o");
         let api = reloaded.apps.get("api").unwrap();
@@ -965,7 +989,7 @@ size = "xs_sml"
         // should pick it up.
         std::fs::write(dir.join("t.secrets"), "apikey = \"toml-secret\"\n").unwrap();
         let (project, _r) =
-            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+            Project::load_and_resolve(&project_path, None, None, &[], None, &[]).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "toml-secret-app");
     }
 
@@ -1003,7 +1027,7 @@ apps:
     #[test]
     fn per_env_picks_default_prod_group() {
         let p = write_tmp("yaml", PER_ENV);
-        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None).unwrap();
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
         let app = project.apps.get("a").unwrap();
         assert_eq!(app.env.get("DOMAIN").unwrap(), "foo.bar");
         assert_eq!(app.env.get("APIKEY").unwrap(), "secret_for_prod");
@@ -1019,6 +1043,7 @@ apps:
             None,
             &[("env".to_string(), "dev".to_string())],
             None,
+            &[],
         )
         .unwrap();
         let app = project.apps.get("a").unwrap();
@@ -1038,6 +1063,7 @@ apps:
             None,
             &[("env".to_string(), "staging".to_string())],
             None,
+            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("apikey"));
@@ -1067,7 +1093,7 @@ apps:
         std::fs::write(dir.join("myproj.secrets"), "apikey: deadbeef\n").unwrap();
 
         let (project, _r) =
-            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+            Project::load_and_resolve(&project_path, None, None, &[], None, &[]).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "deadbeef-app");
     }
 
@@ -1087,6 +1113,7 @@ apps:
             None,
             &[("env".to_string(), "dev".to_string())],
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -1105,10 +1132,43 @@ apps:
         std::fs::write(dir.join("x.secrets"), "real: super-secret\n").unwrap();
 
         let (project, _r) =
-            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+            Project::load_and_resolve(&project_path, None, None, &[], None, &[]).unwrap();
         assert_eq!(
             project.apps.get("a").unwrap().env.get("K").unwrap(),
             "super-secret"
+        );
+    }
+
+    #[test]
+    fn cli_secret_overrides_file_secret() {
+        let project_path = write_named(
+            "y.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: app\n    kind: node\n    env:\n      K: ${secrets.k}\n",
+        );
+        let dir = project_path.parent().unwrap();
+        std::fs::write(dir.join("y.secrets"), "k: from-file\n").unwrap();
+
+        let cli_secrets = [("k".to_string(), "from-cli".to_string())];
+        let (project, _r) =
+            Project::load_and_resolve(&project_path, None, None, &[], None, &cli_secrets).unwrap();
+        assert_eq!(
+            project.apps.get("a").unwrap().env.get("K").unwrap(),
+            "from-cli"
+        );
+    }
+
+    #[test]
+    fn cli_secret_works_without_any_file() {
+        let project_path = write_named(
+            "y.yaml",
+            "name: P\norg: o\nregion: par\napps:\n  a:\n    name: app\n    kind: node\n    env:\n      K: ${secrets.k}\n",
+        );
+        let cli_secrets = [("k".to_string(), "cli-only".to_string())];
+        let (project, _r) =
+            Project::load_and_resolve(&project_path, None, None, &[], None, &cli_secrets).unwrap();
+        assert_eq!(
+            project.apps.get("a").unwrap().env.get("K").unwrap(),
+            "cli-only"
         );
     }
 
@@ -1124,7 +1184,8 @@ apps:
         std::fs::write(&explicit, "k: from-explicit\n").unwrap();
 
         let (project, _r) =
-            Project::load_and_resolve(&project_path, None, None, &[], Some(&explicit)).unwrap();
+            Project::load_and_resolve(&project_path, None, None, &[], Some(&explicit), &[])
+                .unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "from-explicit-app");
     }
 
@@ -1189,7 +1250,7 @@ apps:
         // The file is named `.secrets` but contains JSON. Should still load.
         std::fs::write(dir.join("j.secrets"), r#"{"apikey":"json-secret"}"#).unwrap();
         let (project, _r) =
-            Project::load_and_resolve(&project_path, None, None, &[], None).unwrap();
+            Project::load_and_resolve(&project_path, None, None, &[], None, &[]).unwrap();
         assert_eq!(project.apps.get("a").unwrap().name, "json-secret");
     }
 
@@ -1207,7 +1268,7 @@ apps:
             "{ this is: not valid: in :: any format ]",
         )
         .unwrap();
-        let err = Project::load_and_resolve(&project_path, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&project_path, None, None, &[], None, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("YAML") || msg.contains("JSON"));
     }
@@ -1218,7 +1279,7 @@ apps:
             "z.yaml",
             "name: P\norg: o\nregion: par\napps:\n  a:\n    name: ${secrets.nope}\n    kind: node\n",
         );
-        let err = Project::load_and_resolve(&project_path, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&project_path, None, None, &[], None, &[]).unwrap_err();
         assert!(err.to_string().contains("secrets.nope") || err.to_string().contains("nope"));
     }
 
@@ -1235,7 +1296,7 @@ variables:
 apps: {}
 "#;
         let p = write_tmp("yaml", mixed);
-        let err = Project::load_and_resolve(&p, None, None, &[], None).unwrap_err();
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
         assert!(err.to_string().contains("either"));
         std::fs::remove_file(&p).ok();
     }
