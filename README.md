@@ -254,7 +254,7 @@ Options:
 | `--env <VALUE>` | Set `${env}` (default `prod`) |
 | `--variable key=value` | One-off variable override (repeatable) |
 | `--variables-file-path <FILE>` | Load variable overrides from a YAML/JSON file (repeatable) |
-| `--secrets-path <FILE>` | Explicit secrets file (otherwise auto-discovered, see below) |
+| `--secrets-file-path <FILE>` | Explicit secrets file (otherwise auto-discovered, see below) |
 | `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
 | `--yes` / `--auto-approve` | Skip the confirmation prompt. Required when stdin is not a TTY. |
 | `--target <SPEC>` | Restrict the run to one resource (repeatable). Syntax: `apps.KEY`, `addons.KEY`, `network_groups.KEY` (also `app.`, `addon.`, `ng.`). |
@@ -381,7 +381,7 @@ Runs, in order:
 8. **Addon catalog (live API)** — addon `kind`, `size`, and per-addon `region` are checked against the live `clever curl /v2/products/addonproviders`.
 9. **App flavor catalog (live API)** — `scalability.instances.minSize` / `maxSize` are checked against `clever curl /v2/products/instances`.
 
-Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variables-file-path`, `--secrets-path`). Plus:
+Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variables-file-path`, `--secrets-file-path`). Plus:
 
 | Flag | Description |
 |---|---|
@@ -613,7 +613,7 @@ Anything you don't want committed (API keys, tokens, passwords) lives in a sidec
 
 Given a project file `myproj.yaml` and an active `${env}` value of e.g. `dev`:
 
-1. If `--secrets-path FILE` is given: **only that file** is loaded (and it must exist).
+1. If `--secrets-file-path FILE` is given: **only that file** is loaded (and it must exist).
 2. Otherwise, both files below are auto-discovered next to the project file, when present:
    - `myproj.secrets` — env-agnostic defaults
    - `myproj.dev.secrets` — env-specific overrides (the basename matches the `${env}` value)
