@@ -148,6 +148,10 @@ pub struct ApplyArgs {
     /// progress against this project (CI matrix sharing a workspace, etc.).
     #[arg(long)]
     pub no_lock: bool,
+
+    /// Skip every pre/post hook declared in the project file.
+    #[arg(long)]
+    pub skip_hooks: bool,
 }
 
 #[derive(Debug, Args)]
@@ -310,6 +314,10 @@ pub struct DeleteArgs {
     /// progress against this project.
     #[arg(long)]
     pub no_lock: bool,
+
+    /// Skip every pre/post hook declared in the project file.
+    #[arg(long)]
+    pub skip_hooks: bool,
 }
 
 #[derive(Debug, Args)]
