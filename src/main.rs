@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod interpolate;
 mod issues;
+mod lock;
 mod model;
 mod state;
 
@@ -22,6 +23,7 @@ fn main() -> Result<()> {
         cli::Command::Check(args) => commands::check::run(args),
         cli::Command::Status(args) => commands::status::run(args),
         cli::Command::Init(args) => commands::init::run(args),
+        cli::Command::Unlock(args) => commands::unlock::run(args),
     }
 }
 
@@ -33,6 +35,7 @@ fn command_format(cmd: &cli::Command) -> cli::OutputFormat {
         cli::Command::Check(a) => a.format,
         cli::Command::Status(a) => a.format,
         cli::Command::Init(a) => a.format,
+        cli::Command::Unlock(a) => a.format,
     }
 }
 
