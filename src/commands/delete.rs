@@ -37,6 +37,7 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         args.region,
         &variables,
         args.secrets_path.as_deref(),
+        &args.secrets,
     )
     .with_context(|| format!("loading project `{}`", file.display()))?;
 
