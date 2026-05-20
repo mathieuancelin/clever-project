@@ -530,7 +530,7 @@ fn expand_secrets(
     out
 }
 
-/// Load a `--variable-path FILE` as a flat list of `(key, value)` pairs.
+/// Load a `--variables-file-path FILE` as a flat list of `(key, value)` pairs.
 /// Accepts YAML, JSON or TOML (detected by extension); the file must be a
 /// mapping of scalars (matching the shape of `--variable foo=bar` overrides).
 pub fn load_variables_file(path: &Path) -> Result<Vec<(String, String)>> {
