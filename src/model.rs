@@ -111,6 +111,8 @@ pub struct App {
     pub domains: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scalability: Option<Scalability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<Build>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
@@ -119,6 +121,18 @@ pub struct App {
     pub env: IndexMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<Hooks>,
+}
+
+/// Build-instance config for an app. When `separate: true`, Clever spins up
+/// a dedicated instance with `flavor` to compile the code before running it.
+/// `flavor` may also be present with `separate: false` — the API tracks
+/// both independently, so we mirror that.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Build {
+    #[serde(default)]
+    pub separate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flavor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -942,6 +956,7 @@ size = "xs_sml"
                         }),
                         domains: vec!["api.example.com".into()],
                         scalability: None,
+                        build: None,
                         dependencies: vec!["db".into()],
                         config: IndexMap::new(),
                         env,
