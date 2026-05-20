@@ -47,6 +47,9 @@ pub enum Command {
     /// Scaffold a new project file by asking a few questions (or via flags
     /// in non-interactive mode).
     Init(InitArgs),
+    /// Remove a stale state lock file. Use this when a previous `apply` or
+    /// `delete` was killed (Ctrl+C, crash, kill -9) and left a lock behind.
+    Unlock(UnlockArgs),
 }
 
 #[derive(Debug, Args)]
@@ -132,6 +135,11 @@ pub struct ApplyArgs {
     /// Output format: `text` (default) or `json`.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+
+    /// Skip the state lock. Use only when you've verified no other run is in
+    /// progress against this project (CI matrix sharing a workspace, etc.).
+    #[arg(long)]
+    pub no_lock: bool,
 }
 
 #[derive(Debug, Args)]
@@ -274,6 +282,11 @@ pub struct DeleteArgs {
     /// Output format: `text` (default) or `json`.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+
+    /// Skip the state lock. Use only when you've verified no other run is in
+    /// progress against this project.
+    #[arg(long)]
+    pub no_lock: bool,
 }
 
 #[derive(Debug, Args)]
@@ -324,6 +337,21 @@ pub struct InitArgs {
 
     /// Output format: `text` (default) or `json`. JSON mode implies
     /// `--non-interactive`.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub struct UnlockArgs {
+    /// Project file path (.yaml/.yml/.json). If omitted, looks for
+    /// `project.clever.yaml`, `.yml` or `.json` in the current directory.
+    pub file: Option<PathBuf>,
+
+    /// Skip the interactive confirmation prompt.
+    #[arg(long, alias = "auto-approve")]
+    pub yes: bool,
+
+    /// Output format: `text` (default) or `json`. JSON mode implies `--yes`.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
 }
