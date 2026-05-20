@@ -104,15 +104,18 @@ impl OrgCache {
 mod tests {
     use super::*;
 
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn fresh_tmp_dir() -> PathBuf {
+        let seq = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "clever-project-resolve-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "clever-project-resolve-{}-{nanos}-{seq}",
+            std::process::id()
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
