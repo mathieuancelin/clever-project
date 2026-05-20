@@ -77,18 +77,17 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
         .map(|a| (a.real_id.clone(), a.name.clone()))
         .collect();
 
-    // Detailed apps — only for those in the project file.
+    // Detailed apps — only for those in the project file. One round-trip
+    // pulls env + vhosts + scalability + build at once; services remain a
+    // separate call (the per-app details endpoint doesn't expose them).
     let mut apps: IndexMap<String, App> = IndexMap::new();
     for listed in &all_apps {
         if !project_app_names.contains(listed.name.as_str()) {
             continue;
         }
-        let env_vars = clever
-            .get_env(&listed.app_id)
-            .with_context(|| format!("reading env of app `{}`", listed.name))?;
-        let domains = clever
-            .get_domains(&listed.app_id)
-            .with_context(|| format!("reading domains of app `{}`", listed.name))?;
+        let details = clever
+            .get_app_details(org, &listed.app_id)
+            .with_context(|| format!("reading details of app `{}`", listed.name))?;
         let services = clever
             .get_services(&listed.app_id)
             .with_context(|| format!("reading services of app `{}`", listed.name))?;
@@ -114,11 +113,11 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
         }
 
         let env: IndexMap<String, String> =
-            env_vars.into_iter().map(|v| (v.name, v.value)).collect();
+            details.env.into_iter().map(|v| (v.name, v.value)).collect();
 
-        let user_domains: Vec<String> = domains
+        let user_domains: Vec<String> = details
+            .vhosts
             .into_iter()
-            .map(|d| d.hostname)
             .filter(|h| !h.ends_with(".cleverapps.io"))
             .collect();
 
@@ -135,7 +134,8 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
                 region: (listed.zone != default_region).then(|| listed.zone.clone()),
                 source,
                 domains: user_domains,
-                scalability: None,
+                scalability: Some(details.scalability),
+                build: details.build,
                 dependencies,
                 config: IndexMap::new(),
                 env,
