@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
-use crate::model::Scalability;
+use crate::model::{Instances, Scalability};
 
 pub fn ensure_available() -> Result<PathBuf> {
     which::which("clever")
@@ -220,6 +220,20 @@ impl Clever {
         let url = format!("https://api.clever-cloud.com/v2/products/instances?for={org}");
         let json = self.run_json(&["curl", &url])?;
         serde_json::from_value(json).context("decoding app instances output")
+    }
+
+    /// Fetch the live env vars, domains, scalability and build config of an
+    /// application in a single request. Replaces the env + domain + scale
+    /// trio for `read` and `status` (apply keeps its independent calls so it
+    /// can diff env/domains against the very latest state right before a
+    /// mutation).
+    pub fn get_app_details(&self, org: &str, app_id: &str) -> Result<AppDetailsView> {
+        let url =
+            format!("https://api.clever-cloud.com/v2/organisations/{org}/applications/{app_id}");
+        let json = self.run_json(&["curl", &url])?;
+        let details: AppDetails =
+            serde_json::from_value(json).context("decoding application details output")?;
+        Ok(app_details_view_from(details))
     }
 
     // -------- write side --------
@@ -450,6 +464,20 @@ impl Clever {
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         self.run(&refs)
+    }
+
+    /// Set the build-instance flavor. `clever scale --build-flavor <name>`
+    /// enables a dedicated build instance (separateBuild=true on the API
+    /// side) using the given flavor. There's no first-party way to *disable*
+    /// separate build from the CLI — once enabled, the user has to clear it
+    /// in the Clever console, so we only call this when the project file
+    /// opts in.
+    pub fn set_build_flavor(&self, app: &str, flavor: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would set build flavor of `{app}` to `{flavor}`");
+            return Ok(());
+        }
+        self.run(&["scale", "--app", app, "--build-flavor", flavor])
     }
 
     /// Restart (or kick off the first deployment of) an application.
@@ -774,6 +802,94 @@ pub struct AppFlavor {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AppDetails {
+    pub instance: AppDetailsInstance,
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
+    #[serde(default)]
+    pub vhosts: Vec<AppDetailsVhost>,
+    #[serde(rename = "buildFlavor", default)]
+    pub build_flavor: Option<AppFlavor>,
+    #[serde(rename = "separateBuild", default)]
+    pub separate_build: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppDetailsInstance {
+    #[serde(rename = "minInstances")]
+    pub min_instances: u32,
+    #[serde(rename = "maxInstances")]
+    pub max_instances: u32,
+    #[serde(rename = "minFlavor")]
+    pub min_flavor: AppFlavor,
+    #[serde(rename = "maxFlavor")]
+    pub max_flavor: AppFlavor,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppDetailsVhost {
+    pub fqdn: String,
+}
+
+/// Decoded view of the per-app details endpoint. The four fields that
+/// `read` / `status` need from a single round-trip, instead of the
+/// previous env + domain + scale trio.
+#[derive(Debug, Clone)]
+pub struct AppDetailsView {
+    pub scalability: Scalability,
+    pub env: Vec<EnvVar>,
+    /// Domain names with the trailing slash the API attaches to vhost
+    /// fqdns stripped off. `.cleverapps.io` entries are *not* filtered here
+    /// — callers decide what to do with them.
+    pub vhosts: Vec<String>,
+    pub build: Option<crate::model::Build>,
+}
+
+fn app_details_view_from(d: AppDetails) -> AppDetailsView {
+    let scalability = scalability_from_details(&d);
+    let vhosts: Vec<String> = d
+        .vhosts
+        .into_iter()
+        .map(|v| v.fqdn.trim_end_matches('/').to_string())
+        .collect();
+    let build = d.build_flavor.map(|f| crate::model::Build {
+        separate: d.separate_build,
+        flavor: Some(f.name),
+    });
+    AppDetailsView {
+        scalability,
+        env: d.env,
+        vhosts,
+        build,
+    }
+}
+
+fn scalability_from_details(d: &AppDetails) -> Scalability {
+    let inst = &d.instance;
+    let is_auto =
+        inst.min_instances != inst.max_instances || inst.min_flavor.name != inst.max_flavor.name;
+    let instances = if is_auto {
+        Instances {
+            min_number: Some(inst.min_instances),
+            max_number: Some(inst.max_instances),
+            min_size: Some(inst.min_flavor.name.clone()),
+            max_size: Some(inst.max_flavor.name.clone()),
+        }
+    } else {
+        Instances {
+            min_number: Some(inst.min_instances),
+            max_number: None,
+            min_size: Some(inst.min_flavor.name.clone()),
+            max_size: None,
+        }
+    };
+    Scalability {
+        auto: is_auto,
+        instances: Some(instances),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,5 +945,162 @@ mod tests {
     fn backoff_caps_shift() {
         // Even at large attempts, the shift is capped so we don't overflow.
         let _ = backoff_delay(100, 100);
+    }
+
+    #[test]
+    fn scalability_from_fixed_deployment() {
+        // minInstances == maxInstances and same flavor → fixed (auto=false),
+        // only min populated.
+        let raw = r#"{
+            "instance": {
+                "minInstances": 1,
+                "maxInstances": 1,
+                "minFlavor": {"name": "XS"},
+                "maxFlavor": {"name": "XS"}
+            }
+        }"#;
+        let details: AppDetails = serde_json::from_str(raw).unwrap();
+        let s = scalability_from_details(&details);
+        assert!(!s.auto);
+        let inst = s.instances.as_ref().unwrap();
+        assert_eq!(inst.min_number, Some(1));
+        assert_eq!(inst.max_number, None);
+        assert_eq!(inst.min_size.as_deref(), Some("XS"));
+        assert_eq!(inst.max_size, None);
+    }
+
+    #[test]
+    fn scalability_from_autoscaled_range() {
+        // Range on either count or flavor → auto=true, min+max populated.
+        let raw = r#"{
+            "instance": {
+                "minInstances": 2,
+                "maxInstances": 8,
+                "minFlavor": {"name": "S"},
+                "maxFlavor": {"name": "M"}
+            }
+        }"#;
+        let details: AppDetails = serde_json::from_str(raw).unwrap();
+        let s = scalability_from_details(&details);
+        assert!(s.auto);
+        let inst = s.instances.as_ref().unwrap();
+        assert_eq!(inst.min_number, Some(2));
+        assert_eq!(inst.max_number, Some(8));
+        assert_eq!(inst.min_size.as_deref(), Some("S"));
+        assert_eq!(inst.max_size.as_deref(), Some("M"));
+    }
+
+    #[test]
+    fn scalability_count_range_but_same_flavor_is_auto() {
+        let raw = r#"{
+            "instance": {
+                "minInstances": 1,
+                "maxInstances": 4,
+                "minFlavor": {"name": "M"},
+                "maxFlavor": {"name": "M"}
+            }
+        }"#;
+        let details: AppDetails = serde_json::from_str(raw).unwrap();
+        let s = scalability_from_details(&details);
+        assert!(s.auto);
+        let inst = s.instances.as_ref().unwrap();
+        assert_eq!(inst.min_number, Some(1));
+        assert_eq!(inst.max_number, Some(4));
+    }
+
+    #[test]
+    fn app_details_view_extracts_env_vhosts_and_build() {
+        let raw = r#"{
+            "id": "app_xx",
+            "instance": {
+                "minInstances": 1,
+                "maxInstances": 1,
+                "minFlavor": {"name": "XS"},
+                "maxFlavor": {"name": "XS"}
+            },
+            "env": [
+                {"name": "PORT", "value": "8080"},
+                {"name": "DEBUG", "value": "1"}
+            ],
+            "vhosts": [
+                {"fqdn": "x.cleverapps.io/"},
+                {"fqdn": "api.example.com/"}
+            ],
+            "buildFlavor": {"name": "M"},
+            "separateBuild": false
+        }"#;
+        let d: AppDetails = serde_json::from_str(raw).unwrap();
+        let view = app_details_view_from(d);
+        // env passthrough
+        assert_eq!(view.env.len(), 2);
+        assert_eq!(view.env[0].name, "PORT");
+        assert_eq!(view.env[0].value, "8080");
+        // trailing slash stripped, no filtering on cleverapps.io here
+        assert_eq!(
+            view.vhosts,
+            vec!["x.cleverapps.io".to_string(), "api.example.com".to_string()]
+        );
+        // build flavor preserved, separate=false
+        let build = view.build.unwrap();
+        assert!(!build.separate);
+        assert_eq!(build.flavor.as_deref(), Some("M"));
+    }
+
+    #[test]
+    fn app_details_view_handles_separate_build_true() {
+        let raw = r#"{
+            "instance": {
+                "minInstances": 1,
+                "maxInstances": 1,
+                "minFlavor": {"name": "XS"},
+                "maxFlavor": {"name": "XS"}
+            },
+            "buildFlavor": {"name": "L"},
+            "separateBuild": true
+        }"#;
+        let d: AppDetails = serde_json::from_str(raw).unwrap();
+        let view = app_details_view_from(d);
+        let build = view.build.unwrap();
+        assert!(build.separate);
+        assert_eq!(build.flavor.as_deref(), Some("L"));
+    }
+
+    #[test]
+    fn app_details_view_no_build_flavor_means_no_build_block() {
+        let raw = r#"{
+            "instance": {
+                "minInstances": 1,
+                "maxInstances": 1,
+                "minFlavor": {"name": "XS"},
+                "maxFlavor": {"name": "XS"}
+            }
+        }"#;
+        let d: AppDetails = serde_json::from_str(raw).unwrap();
+        let view = app_details_view_from(d);
+        assert!(view.build.is_none());
+        assert!(view.env.is_empty());
+        assert!(view.vhosts.is_empty());
+    }
+
+    #[test]
+    fn app_details_ignores_unknown_fields() {
+        // The real endpoint returns dozens of fields. We only deserialize a
+        // handful; the rest must not cause failure.
+        let raw = r#"{
+            "id": "app_xx",
+            "name": "x",
+            "instance": {
+                "type": "node",
+                "minInstances": 1,
+                "maxInstances": 1,
+                "minFlavor": {"name": "XS", "mem": 1152, "cpus": 1, "extra": "ignored"},
+                "maxFlavor": {"name": "XS"},
+                "flavors": [{"name": "pico"}, {"name": "XS"}]
+            },
+            "vhosts": [{"fqdn": "x.cleverapps.io/"}],
+            "env": [{"name": "K", "value": "v"}]
+        }"#;
+        let details: AppDetails = serde_json::from_str(raw).unwrap();
+        assert_eq!(details.instance.min_flavor.name, "XS");
     }
 }
