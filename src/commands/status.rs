@@ -586,6 +586,7 @@ mod tests {
             dependencies: vec![],
             config: IndexMap::new(),
             env: IndexMap::new(),
+            hooks: None,
         }
     }
 
@@ -771,6 +772,7 @@ mod tests {
             apps: IndexMap::new(),
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
+            hooks: None,
         };
         // Synced
         project
