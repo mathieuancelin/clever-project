@@ -159,6 +159,10 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         Some(crate::lock::acquire(state.path(), "apply", &file)?)
     };
 
+    // Pre-hooks: project-level first, then per-app for every targeted app.
+    // A pre-hook failure aborts before any mutation goes out.
+    run_pre_apply_hooks(&project, &targets, &file, &effective_env, args.skip_hooks)?;
+
     let mut cache = OrgCache::new();
 
     // Phase 1 — addons.
@@ -374,7 +378,101 @@ pub fn run(args: ApplyArgs) -> Result<()> {
 
     persist_state(&clever, &state)?;
 
+    // Post-hooks: per-app first, then project-level. A post-hook failure
+    // surfaces as an apply error even though the mutations already landed.
+    run_post_apply_hooks(&project, &targets, &file, &effective_env, args.skip_hooks)?;
+
     info!("apply complete");
+    Ok(())
+}
+
+fn run_pre_apply_hooks(
+    project: &Project,
+    targets: &Targets,
+    project_path: &std::path::Path,
+    env: &str,
+    skip: bool,
+) -> Result<()> {
+    use crate::hooks::{HookAppContext, HookContext, HookOperation, HookPhase, run_hook};
+    if let Some(cmd) = project.hooks.as_ref().and_then(|h| h.pre_apply.as_deref()) {
+        let ctx = HookContext {
+            operation: HookOperation::Apply,
+            phase: HookPhase::Pre,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: None,
+        };
+        run_hook(cmd, &ctx, false, skip)?;
+    }
+    for (key, app) in &project.apps {
+        if !targets.is_targeted(TargetKind::App, key) {
+            continue;
+        }
+        let Some(cmd) = app.hooks.as_ref().and_then(|h| h.pre_apply.as_deref()) else {
+            continue;
+        };
+        let ctx = HookContext {
+            operation: HookOperation::Apply,
+            phase: HookPhase::Pre,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: Some(HookAppContext {
+                key,
+                name: &app.name,
+                kind: &app.kind,
+            }),
+        };
+        run_hook(cmd, &ctx, false, skip)?;
+    }
+    Ok(())
+}
+
+fn run_post_apply_hooks(
+    project: &Project,
+    targets: &Targets,
+    project_path: &std::path::Path,
+    env: &str,
+    skip: bool,
+) -> Result<()> {
+    use crate::hooks::{HookAppContext, HookContext, HookOperation, HookPhase, run_hook};
+    for (key, app) in &project.apps {
+        if !targets.is_targeted(TargetKind::App, key) {
+            continue;
+        }
+        let Some(cmd) = app.hooks.as_ref().and_then(|h| h.post_apply.as_deref()) else {
+            continue;
+        };
+        let ctx = HookContext {
+            operation: HookOperation::Apply,
+            phase: HookPhase::Post,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: Some(HookAppContext {
+                key,
+                name: &app.name,
+                kind: &app.kind,
+            }),
+        };
+        run_hook(cmd, &ctx, false, skip)?;
+    }
+    if let Some(cmd) = project.hooks.as_ref().and_then(|h| h.post_apply.as_deref()) {
+        let ctx = HookContext {
+            operation: HookOperation::Apply,
+            phase: HookPhase::Post,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: None,
+        };
+        run_hook(cmd, &ctx, false, skip)?;
+    }
     Ok(())
 }
 
@@ -1458,6 +1556,7 @@ mod tests {
             dependencies: vec![],
             config: IndexMap::new(),
             env: IndexMap::new(),
+            hooks: None,
         }
     }
 
@@ -1522,6 +1621,7 @@ mod tests {
                 dependencies: vec![],
                 config: IndexMap::new(),
                 env: IndexMap::new(),
+                hooks: None,
             },
         );
         let mut issues = Vec::new();
