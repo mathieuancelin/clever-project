@@ -255,6 +255,7 @@ Options:
 | `--variable key=value` | One-off variable override (repeatable) |
 | `--variables-file-path <FILE>` | Load variable overrides from a YAML/JSON file (repeatable) |
 | `--secrets-file-path <FILE>` | Explicit secrets file (otherwise auto-discovered, see below) |
+| `--secret key=value` | One-off secret override (repeatable). Wins over secrets files. |
 | `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
 | `--yes` / `--auto-approve` | Skip the confirmation prompt. Required when stdin is not a TTY. |
 | `--target <SPEC>` | Restrict the run to one resource (repeatable). Syntax: `apps.KEY`, `addons.KEY`, `network_groups.KEY` (also `app.`, `addon.`, `ng.`). |
@@ -381,7 +382,7 @@ Runs, in order:
 8. **Addon catalog (live API)** — addon `kind`, `size`, and per-addon `region` are checked against the live `clever curl /v2/products/addonproviders`.
 9. **App flavor catalog (live API)** — `scalability.instances.minSize` / `maxSize` are checked against `clever curl /v2/products/instances`.
 
-Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variables-file-path`, `--secrets-file-path`). Plus:
+Same variable/env flags as `apply` (`--org`, `--region`, `--env`, `--variable`, `--variables-file-path`, `--secret`, `--secrets-file-path`). Plus:
 
 | Flag | Description |
 |---|---|
@@ -619,8 +620,9 @@ Given a project file `myproj.yaml` and an active `${env}` value of e.g. `dev`:
    - `myproj.dev.secrets` — env-specific overrides (the basename matches the `${env}` value)
 
    When both exist, entries from the env-specific file override the defaults.
+3. `--secret key=value` overrides are layered on top of whatever the file step produced. Repeatable; the last value for a given key wins. CI workflows that don't want plaintext secrets on disk can use this exclusively — no `.secrets` file required.
 
-If neither file exists, the secrets map is simply empty. Referencing `${secrets.X}` with no value for `X` errors out.
+If neither a file nor any `--secret` override provides a value, the secrets map is simply empty. Referencing `${secrets.X}` with no value for `X` errors out.
 
 ### File format
 
