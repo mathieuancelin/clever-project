@@ -170,6 +170,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
                 addon,
             )?;
             addon_id_by_key.insert(key.clone(), id);
+            persist_state(&clever, &state)?;
         } else if let Some(id) =
             lookup_addon_id(&clever, &state, &mut cache, &project.org, &addon.name)?
         {
@@ -197,6 +198,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
             app_id_by_key.insert(key.clone(), outcome.id.clone());
             outcomes.insert(key.clone(), outcome);
             apps_to_link.push((key.clone(), app));
+            persist_state(&clever, &state)?;
         } else if let Some(id) =
             lookup_app_id(&clever, &state, &mut cache, &project.org, &app.name)?
         {
@@ -265,11 +267,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
                 &mut app_id_by_key,
                 &mut addon_id_by_key,
             )?;
-            if !clever.is_dry_run() {
-                state
-                    .save()
-                    .with_context(|| format!("saving state file `{}`", state.path().display()))?;
-            }
+            persist_state(&clever, &state)?;
             // Sync the per-app outcome ids too — refresh may have rewritten them.
             for (key, outcome) in outcomes.iter_mut() {
                 if let Some(new_id) = app_id_by_key.get(key) {
@@ -321,6 +319,7 @@ pub fn run(args: ApplyArgs) -> Result<()> {
                 addon_real_id_by_key.insert(key.clone(), rid);
             }
         }
+        persist_state(&clever, &state)?;
 
         sync_network_groups(
             &clever,
@@ -362,14 +361,22 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         }
     }
 
-    if !clever.is_dry_run() {
-        state
-            .save()
-            .with_context(|| format!("saving state file `{}`", state.path().display()))?;
-    }
+    persist_state(&clever, &state)?;
 
     info!("apply complete");
     Ok(())
+}
+
+/// Persist state to disk if we're not in dry-run. Called after every successful
+/// mutation so a mid-apply crash leaves the local state in sync with what was
+/// actually pushed to Clever — no need to re-list the whole org on rerun.
+fn persist_state(clever: &Clever, state: &State) -> Result<()> {
+    if clever.is_dry_run() {
+        return Ok(());
+    }
+    state
+        .save()
+        .with_context(|| format!("saving state file `{}`", state.path().display()))
 }
 
 /// Resolve a non-targeted addon to its live id without mutating anything.
@@ -1177,6 +1184,7 @@ fn sync_network_groups(
             };
 
         if was_just_created {
+            persist_state(clever, state)?;
             continue;
         }
 
@@ -1190,6 +1198,7 @@ fn sync_network_groups(
         for id in current.difference(&desired) {
             clever.ng_unlink(id, &ng_id, &project.org)?;
         }
+        persist_state(clever, state)?;
     }
     Ok(())
 }
