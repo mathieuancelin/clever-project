@@ -470,6 +470,32 @@ clever-project read --org <ID> [--app NAME_OR_ID]... [--addon NAME_OR_ID]... [--
 | `--all` | Read every app and addon in the org (mutually exclusive with `--app`/`--addon`) |
 | `-o, --output <FILE>` | Output path (`.yaml` / `.yml` / `.json`) |
 
+## Shell completions
+
+`clever-project completions <SHELL>` prints a completion script to stdout. Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`.
+
+```sh
+# zsh — drop into any directory on $fpath, e.g.
+clever-project completions zsh > ~/.zsh/completions/_clever-project
+# then add `fpath+=(~/.zsh/completions)` to ~/.zshrc and `autoload -U compinit && compinit`
+
+# bash — system-wide
+clever-project completions bash | sudo tee /etc/bash_completion.d/clever-project
+# or user-local: source it from ~/.bashrc
+clever-project completions bash > ~/.local/share/bash-completion/completions/clever-project
+
+# fish
+clever-project completions fish > ~/.config/fish/completions/clever-project.fish
+
+# elvish
+clever-project completions elvish > ~/.config/elvish/lib/clever-project-completions.elv
+
+# powershell — add the output to your $PROFILE
+clever-project completions powershell >> $PROFILE
+```
+
+Completions cover every subcommand (`apply`, `delete`, `check`, `status`, `init`, `read`, `unlock`, `completions`), all their flags, and enum values (e.g. shell names, output formats).
+
 ## Project file format
 
 YAML, JSON or TOML, detected by extension (`.yaml`, `.yml`, `.json`, `.toml`). The same schema applies to all three — pick the one your team is most comfortable with. `read` writes whichever extension you specified for `-o`, and `init` defaults to YAML but accepts any `-o` extension.
