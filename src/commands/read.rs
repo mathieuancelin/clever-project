@@ -70,12 +70,11 @@ pub fn run(args: ReadArgs) -> Result<()> {
     let mut apps: IndexMap<String, App> = IndexMap::new();
     for listed in &selected_apps {
         info!("reading app `{}` ({})", listed.name, listed.app_id);
-        let env_vars = clever
-            .get_env(&listed.app_id)
-            .with_context(|| format!("reading env of app `{}`", listed.name))?;
-        let domains = clever
-            .get_domains(&listed.app_id)
-            .with_context(|| format!("reading domains of app `{}`", listed.name))?;
+        // One call returns env + vhosts + scalability + build. Services still
+        // come from a separate endpoint — keep that call.
+        let details = clever
+            .get_app_details(&args.org, &listed.app_id)
+            .with_context(|| format!("reading details of app `{}`", listed.name))?;
         let services = clever
             .get_services(&listed.app_id)
             .with_context(|| format!("reading services of app `{}`", listed.name))?;
@@ -101,11 +100,11 @@ pub fn run(args: ReadArgs) -> Result<()> {
         }
 
         let env: IndexMap<String, String> =
-            env_vars.into_iter().map(|v| (v.name, v.value)).collect();
+            details.env.into_iter().map(|v| (v.name, v.value)).collect();
 
-        let user_domains: Vec<String> = domains
+        let user_domains: Vec<String> = details
+            .vhosts
             .into_iter()
-            .map(|d| d.hostname)
             .filter(|h| !h.ends_with(".cleverapps.io"))
             .collect();
 
@@ -122,7 +121,8 @@ pub fn run(args: ReadArgs) -> Result<()> {
                 region: (listed.zone != default_region).then(|| listed.zone.clone()),
                 source,
                 domains: user_domains,
-                scalability: None, // `clever scale` has no read/JSON mode
+                scalability: Some(details.scalability),
+                build: details.build,
                 dependencies,
                 config: IndexMap::new(), // out of scope for the prototype
                 env,
