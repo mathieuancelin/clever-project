@@ -28,7 +28,7 @@ use crate::commands::diff::{
 };
 use crate::commands::live::LiveSnapshot;
 use crate::commands::targets::{TargetKind, Targets};
-use crate::model::{Addon, App, Project};
+use crate::model::{Addon, App, Build, Project, Scalability};
 
 #[derive(Debug, Default, Serialize)]
 pub struct Plan {
@@ -241,7 +241,78 @@ fn diff_app_mutable(file: &App, live: &App) -> Vec<FieldDiff> {
     if let Some(d) = diff_map("env", &file.env, &live.env) {
         diffs.push(d);
     }
+    // Scalability drift: only surface when the file declares an explicit
+    // block. If the file omits `scalability`, apply doesn't touch it either,
+    // so reporting drift would be noise.
+    if let Some(file_scale) = file.scalability.as_ref() {
+        if let Some(d) = diff_scalability(file_scale, live.scalability.as_ref()) {
+            diffs.push(d);
+        }
+    }
+    if let Some(file_build) = file.build.as_ref() {
+        if let Some(d) = diff_build(file_build, live.build.as_ref()) {
+            diffs.push(d);
+        }
+    }
     diffs
+}
+
+fn diff_build(file: &Build, live: Option<&Build>) -> Option<FieldDiff> {
+    let file_str = build_summary(file);
+    let live_str = live.map(build_summary).unwrap_or_default();
+    if file_str == live_str {
+        return None;
+    }
+    Some(FieldDiff {
+        field: "build".into(),
+        body: DiffBody::Scalar {
+            file: file_str,
+            live: live_str,
+        },
+    })
+}
+
+fn build_summary(b: &Build) -> String {
+    let mode = if b.separate { "separate" } else { "inline" };
+    match &b.flavor {
+        Some(f) => format!("{mode} {f}"),
+        None => mode.into(),
+    }
+}
+
+fn diff_scalability(file: &Scalability, live: Option<&Scalability>) -> Option<FieldDiff> {
+    let live_str = live.map(scalability_summary).unwrap_or_default();
+    let file_str = scalability_summary(file);
+    if file_str == live_str {
+        return None;
+    }
+    Some(FieldDiff {
+        field: "scalability".into(),
+        body: DiffBody::Scalar {
+            file: file_str,
+            live: live_str,
+        },
+    })
+}
+
+fn scalability_summary(s: &Scalability) -> String {
+    let mode = if s.auto { "auto" } else { "fixed" };
+    let inst = s.instances.as_ref();
+    let min_n = inst.and_then(|i| i.min_number);
+    let max_n = inst.and_then(|i| i.max_number);
+    let min_s = inst.and_then(|i| i.min_size.as_deref());
+    let max_s = inst.and_then(|i| i.max_size.as_deref());
+    let count = match (min_n, max_n) {
+        (Some(a), Some(b)) if a != b => format!("{a}-{b}"),
+        (Some(a), _) => a.to_string(),
+        _ => "?".into(),
+    };
+    let flavor = match (min_s, max_s) {
+        (Some(a), Some(b)) if a != b => format!("{a}-{b}"),
+        (Some(a), _) => a.to_string(),
+        _ => "?".into(),
+    };
+    format!("{mode} {count}× {flavor}")
 }
 
 fn diff_app_non_mutable(
@@ -665,6 +736,7 @@ mod tests {
             source: None,
             domains: vec![],
             scalability: None,
+            build: None,
             dependencies: vec![],
             config: IndexMap::new(),
             env: IndexMap::new(),
@@ -792,6 +864,139 @@ mod tests {
             _ => panic!(),
         }
         assert_eq!(plan.mutation_count(), 1);
+    }
+
+    #[test]
+    fn scalability_drift_surfaces_when_file_declares_it() {
+        use crate::model::{Instances, Scalability};
+        let mut project = empty_project();
+        let mut file_api = make_app("prod-api", "node");
+        file_api.scalability = Some(Scalability {
+            auto: false,
+            instances: Some(Instances {
+                min_number: Some(1),
+                max_number: None,
+                min_size: Some("XS".into()),
+                max_size: None,
+            }),
+        });
+        project.apps.insert("api".into(), file_api);
+
+        let mut live = empty_live();
+        let mut live_api = make_app("prod-api", "node");
+        live_api.scalability = Some(Scalability {
+            auto: false,
+            instances: Some(Instances {
+                min_number: Some(2),
+                max_number: None,
+                min_size: Some("S".into()),
+                max_size: None,
+            }),
+        });
+        live.apps.insert("prod-api".into(), live_api);
+
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.apps[0].kind {
+            AppOpKind::Existing { mutations, .. } => {
+                let scale_diff = mutations.iter().find(|d| d.field == "scalability");
+                assert!(
+                    scale_diff.is_some(),
+                    "expected scalability drift, got mutations: {mutations:?}"
+                );
+            }
+            _ => panic!("expected Existing app"),
+        }
+    }
+
+    #[test]
+    fn scalability_drift_not_reported_when_file_omits_it() {
+        use crate::model::{Instances, Scalability};
+        let mut project = empty_project();
+        // file: no scalability block
+        project
+            .apps
+            .insert("api".into(), make_app("prod-api", "node"));
+
+        let mut live = empty_live();
+        let mut live_api = make_app("prod-api", "node");
+        live_api.scalability = Some(Scalability {
+            auto: true,
+            instances: Some(Instances {
+                min_number: Some(1),
+                max_number: Some(4),
+                min_size: Some("S".into()),
+                max_size: Some("M".into()),
+            }),
+        });
+        live.apps.insert("prod-api".into(), live_api);
+
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.apps[0].kind {
+            AppOpKind::Existing { mutations, .. } => {
+                assert!(
+                    mutations.iter().all(|d| d.field != "scalability"),
+                    "scalability drift reported despite file having no block"
+                );
+            }
+            _ => panic!("expected Existing app"),
+        }
+    }
+
+    #[test]
+    fn build_drift_surfaces_when_file_declares_it() {
+        use crate::model::Build;
+        let mut project = empty_project();
+        let mut file_api = make_app("prod-api", "node");
+        file_api.build = Some(Build {
+            separate: true,
+            flavor: Some("M".into()),
+        });
+        project.apps.insert("api".into(), file_api);
+
+        let mut live = empty_live();
+        let mut live_api = make_app("prod-api", "node");
+        live_api.build = Some(Build {
+            separate: false,
+            flavor: Some("M".into()),
+        });
+        live.apps.insert("prod-api".into(), live_api);
+
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.apps[0].kind {
+            AppOpKind::Existing { mutations, .. } => {
+                let build_diff = mutations.iter().find(|d| d.field == "build");
+                assert!(
+                    build_diff.is_some(),
+                    "expected build drift, got {mutations:?}"
+                );
+            }
+            _ => panic!("expected Existing"),
+        }
+    }
+
+    #[test]
+    fn build_no_drift_when_file_omits_it() {
+        use crate::model::Build;
+        let mut project = empty_project();
+        project
+            .apps
+            .insert("api".into(), make_app("prod-api", "node"));
+
+        let mut live = empty_live();
+        let mut live_api = make_app("prod-api", "node");
+        live_api.build = Some(Build {
+            separate: true,
+            flavor: Some("L".into()),
+        });
+        live.apps.insert("prod-api".into(), live_api);
+
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.apps[0].kind {
+            AppOpKind::Existing { mutations, .. } => {
+                assert!(mutations.iter().all(|d| d.field != "build"));
+            }
+            _ => panic!("expected Existing"),
+        }
     }
 
     #[test]
