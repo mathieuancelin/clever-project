@@ -1,6 +1,7 @@
 mod clever;
 mod cli;
 mod commands;
+mod hooks;
 mod interpolate;
 mod issues;
 mod lock;
