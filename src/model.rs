@@ -72,6 +72,20 @@ pub struct Project {
     pub addons: IndexMap<String, Addon>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub network_groups: IndexMap<String, NetworkGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<Hooks>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Hooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_apply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_apply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_delete: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_delete: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +117,8 @@ pub struct App {
     pub config: IndexMap<String, String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub env: IndexMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<Hooks>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -929,6 +945,7 @@ size = "xs_sml"
                         dependencies: vec!["db".into()],
                         config: IndexMap::new(),
                         env,
+                        hooks: None,
                     },
                 );
                 m
@@ -950,6 +967,7 @@ size = "xs_sml"
                 m
             },
             network_groups: IndexMap::new(),
+            hooks: None,
         };
 
         let mut p = std::env::temp_dir();
