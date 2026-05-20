@@ -112,7 +112,7 @@ pub struct ApplyArgs {
     /// Explicit path to a secrets file. When omitted, secrets are
     /// auto-discovered next to the project file (`<stem>.secrets` and
     /// `<stem>.<env>.secrets`).
-    #[arg(long)]
+    #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
 
     /// Plan only: read current state and log what would change without
@@ -170,7 +170,7 @@ pub struct CheckArgs {
     pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file.
-    #[arg(long)]
+    #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
 
     /// Skip live validation against Clever's API (addon catalog, app
@@ -213,7 +213,7 @@ pub struct StatusArgs {
     pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file.
-    #[arg(long)]
+    #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
 
     /// Hide resources that are perfectly in sync; only show drift.
@@ -262,7 +262,7 @@ pub struct DeleteArgs {
     /// Explicit path to a secrets file. When omitted, secrets are
     /// auto-discovered next to the project file (`<stem>.secrets` and
     /// `<stem>.<env>.secrets`).
-    #[arg(long)]
+    #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
 
     /// Plan only: log what would be deleted without mutating anything.
