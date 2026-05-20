@@ -370,6 +370,7 @@ fn build_project(inputs: &Inputs) -> Project {
             source,
             domains: vec![],
             scalability: None,
+            build: None,
             dependencies,
             config: IndexMap::new(),
             env: IndexMap::new(),
