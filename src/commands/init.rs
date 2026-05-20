@@ -537,7 +537,7 @@ mod tests {
                 .as_nanos()
         ));
         project.save(&path).unwrap();
-        let (loaded, _) = Project::load_and_resolve(&path, None, None, &[], None).unwrap();
+        let (loaded, _) = Project::load_and_resolve(&path, None, None, &[], None, &[]).unwrap();
         assert_eq!(loaded.name, inputs.name);
         assert_eq!(loaded.org, inputs.org);
         // ${env} unresolved becomes `prod-my-stack` after load_and_resolve
