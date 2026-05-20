@@ -220,6 +220,7 @@ mod tests {
             source: None,
             domains: vec![],
             scalability: None,
+            build: None,
             dependencies: deps.iter().map(|s| s.to_string()).collect(),
             config: IndexMap::new(),
             env: IndexMap::new(),
