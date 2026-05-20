@@ -943,6 +943,22 @@ fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<bool> {
         clever.scale(app_id, scale)?;
     }
 
+    // build flavor — only push when the project file opts in to a separate
+    // build instance with an explicit flavor. Disabling separateBuild is not
+    // exposed by clever-tools, so we don't attempt it.
+    if let Some(build) = &app.build {
+        if build.separate {
+            if let Some(flavor) = build.flavor.as_deref() {
+                clever.set_build_flavor(app_id, flavor)?;
+            } else {
+                warn!(
+                    "app `{}` build.separate is true but build.flavor is unset — skipping",
+                    app.name
+                );
+            }
+        }
+    }
+
     Ok(env_changed)
 }
 
@@ -1553,6 +1569,7 @@ mod tests {
                     max_size: max.map(str::to_string),
                 }),
             }),
+            build: None,
             dependencies: vec![],
             config: IndexMap::new(),
             env: IndexMap::new(),
@@ -1618,6 +1635,7 @@ mod tests {
                 source: None,
                 domains: vec![],
                 scalability: None,
+                build: None,
                 dependencies: vec![],
                 config: IndexMap::new(),
                 env: IndexMap::new(),
