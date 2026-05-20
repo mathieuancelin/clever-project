@@ -126,6 +126,7 @@ pub fn run(args: ReadArgs) -> Result<()> {
                 dependencies,
                 config: IndexMap::new(), // out of scope for the prototype
                 env,
+                hooks: None,
             },
         );
     }
@@ -156,6 +157,7 @@ pub fn run(args: ReadArgs) -> Result<()> {
         apps,
         addons,
         network_groups: IndexMap::new(),
+        hooks: None,
     };
 
     project
