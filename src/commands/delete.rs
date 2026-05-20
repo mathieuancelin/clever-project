@@ -87,6 +87,14 @@ pub fn run(args: DeleteArgs) -> Result<()> {
     }
 
     let mut state = State::load(&file)?;
+
+    let _lock_guard = if args.no_lock {
+        warn!("--no-lock passed — running without a state lock");
+        None
+    } else {
+        Some(crate::lock::acquire(state.path(), "delete", &file)?)
+    };
+
     let mut cache = OrgCache::new();
     let mut failures = 0usize;
 
