@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod check;
+pub mod completions;
 pub mod delete;
 pub mod diff;
 pub mod init;
