@@ -9,6 +9,7 @@ pub mod prompt;
 pub mod read;
 pub mod status;
 pub mod targets;
+pub mod unlock;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
