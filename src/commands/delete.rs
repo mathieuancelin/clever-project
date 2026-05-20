@@ -96,6 +96,15 @@ pub fn run(args: DeleteArgs) -> Result<()> {
         Some(crate::lock::acquire(state.path(), "delete", &file)?)
     };
 
+    let effective_env = variables
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "env")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "prod".to_string());
+
+    run_pre_delete_hooks(&project, &targets, &file, &effective_env, args.skip_hooks)?;
+
     let mut cache = OrgCache::new();
     let mut failures = 0usize;
 
@@ -165,10 +174,106 @@ pub fn run(args: DeleteArgs) -> Result<()> {
             .with_context(|| format!("saving state file `{}`", state.path().display()))?;
     }
 
+    run_post_delete_hooks(&project, &targets, &file, &effective_env, args.skip_hooks)?;
+
     if failures > 0 {
         warn!("delete finished with {failures} failure(s); see warnings above");
     } else {
         info!("delete complete");
+    }
+    Ok(())
+}
+
+fn run_pre_delete_hooks(
+    project: &Project,
+    targets: &Targets,
+    project_path: &std::path::Path,
+    env: &str,
+    skip: bool,
+) -> Result<()> {
+    use crate::hooks::{HookAppContext, HookContext, HookOperation, HookPhase, run_hook};
+    if let Some(cmd) = project.hooks.as_ref().and_then(|h| h.pre_delete.as_deref()) {
+        let ctx = HookContext {
+            operation: HookOperation::Delete,
+            phase: HookPhase::Pre,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: None,
+        };
+        run_hook(cmd, &ctx, false, skip)?;
+    }
+    for (key, app) in &project.apps {
+        if !targets.is_targeted(TargetKind::App, key) {
+            continue;
+        }
+        let Some(cmd) = app.hooks.as_ref().and_then(|h| h.pre_delete.as_deref()) else {
+            continue;
+        };
+        let ctx = HookContext {
+            operation: HookOperation::Delete,
+            phase: HookPhase::Pre,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: Some(HookAppContext {
+                key,
+                name: &app.name,
+                kind: &app.kind,
+            }),
+        };
+        run_hook(cmd, &ctx, false, skip)?;
+    }
+    Ok(())
+}
+
+fn run_post_delete_hooks(
+    project: &Project,
+    targets: &Targets,
+    project_path: &std::path::Path,
+    env: &str,
+    skip: bool,
+) -> Result<()> {
+    use crate::hooks::{HookAppContext, HookContext, HookOperation, HookPhase, run_hook};
+    for (key, app) in &project.apps {
+        if !targets.is_targeted(TargetKind::App, key) {
+            continue;
+        }
+        let Some(cmd) = app.hooks.as_ref().and_then(|h| h.post_delete.as_deref()) else {
+            continue;
+        };
+        let ctx = HookContext {
+            operation: HookOperation::Delete,
+            phase: HookPhase::Post,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: Some(HookAppContext {
+                key,
+                name: &app.name,
+                kind: &app.kind,
+            }),
+        };
+        run_hook(cmd, &ctx, false, skip)?;
+    }
+    if let Some(cmd) = project
+        .hooks
+        .as_ref()
+        .and_then(|h| h.post_delete.as_deref())
+    {
+        let ctx = HookContext {
+            operation: HookOperation::Delete,
+            phase: HookPhase::Post,
+            project_path,
+            org: &project.org,
+            region: &project.region,
+            env,
+            app: None,
+        };
+        run_hook(cmd, &ctx, false, skip)?;
     }
     Ok(())
 }
@@ -409,6 +514,7 @@ mod tests {
             apps: IndexMap::new(),
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
+            hooks: None,
         }
     }
 
@@ -423,6 +529,7 @@ mod tests {
             dependencies: vec![],
             config: IndexMap::new(),
             env: IndexMap::new(),
+            hooks: None,
         }
     }
 
