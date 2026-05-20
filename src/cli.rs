@@ -115,6 +115,11 @@ pub struct ApplyArgs {
     #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
 
+    /// Set a secret (key=value). Overrides values from the project's secrets
+    /// files (or from --secrets-file-path).
+    #[arg(long = "secret", value_parser = parse_kv)]
+    pub secrets: Vec<(String, String)>,
+
     /// Plan only: read current state and log what would change without
     /// mutating anything on Clever Cloud.
     #[arg(long)]
@@ -173,6 +178,11 @@ pub struct CheckArgs {
     #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
 
+    /// Set a secret (key=value). Overrides values from the project's secrets
+    /// files (or from --secrets-file-path).
+    #[arg(long = "secret", value_parser = parse_kv)]
+    pub secrets: Vec<(String, String)>,
+
     /// Skip live validation against Clever's API (addon catalog, app
     /// instance flavors). Useful in CI environments without `clever login`.
     /// Static validation (syntax, variables, kinds, regions, dependencies,
@@ -215,6 +225,11 @@ pub struct StatusArgs {
     /// Explicit path to a secrets file.
     #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
+
+    /// Set a secret (key=value). Overrides values from the project's secrets
+    /// files (or from --secrets-file-path).
+    #[arg(long = "secret", value_parser = parse_kv)]
+    pub secrets: Vec<(String, String)>,
 
     /// Hide resources that are perfectly in sync; only show drift.
     #[arg(long)]
@@ -264,6 +279,11 @@ pub struct DeleteArgs {
     /// `<stem>.<env>.secrets`).
     #[arg(long = "secrets-file-path")]
     pub secrets_path: Option<PathBuf>,
+
+    /// Set a secret (key=value). Overrides values from the project's secrets
+    /// files (or from --secrets-file-path).
+    #[arg(long = "secret", value_parser = parse_kv)]
+    pub secrets: Vec<(String, String)>,
 
     /// Plan only: log what would be deleted without mutating anything.
     #[arg(long)]
