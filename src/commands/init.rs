@@ -373,6 +373,7 @@ fn build_project(inputs: &Inputs) -> Project {
             dependencies,
             config: IndexMap::new(),
             env: IndexMap::new(),
+            hooks: None,
         },
     );
 
@@ -402,6 +403,7 @@ fn build_project(inputs: &Inputs) -> Project {
         apps,
         addons,
         network_groups: IndexMap::new(),
+        hooks: None,
     }
 }
 
