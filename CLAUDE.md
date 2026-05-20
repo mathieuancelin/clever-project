@@ -136,7 +136,12 @@ In `state.rs`:
 - **Variable interpolation is single-pass.** `variables.foo: ${bar}` won't expand `${bar}` before storage — only `${secrets.X}` is pre-expanded in variable values. Document this if it bites a user.
 - **`clever config` has no JSON mode** — the `config:` field in the model is parsed but ignored on both `read` and `apply`. Don't try to wire it up by parsing human output.
 - **`clever scale` has no read mode**, so `read` and `status` go through the per-app v2 endpoint (`Clever::get_app_details` → `/v2/organisations/{org}/applications/{app}`) which returns env + vhosts + scalability + buildFlavor + separateBuild in one call. `read` and `live::snapshot` use it to consolidate what used to be 3 separate API calls per app into one. `auto` on scalability is inferred: equal min/max on both count and flavor → `auto: false`; any range → `auto: true`. Scalability and build drift are reported by `status` only when the project file declares the corresponding block, matching apply's "don't touch if absent" behaviour.
-- **Build flavor (`App.build`)** mirrors the API's `buildFlavor` + `separateBuild`. `apply` only calls `clever scale --build-flavor <X>` when `build.separate == true && build.flavor.is_some()` — `clever-tools` doesn't expose a way to *disable* separate build, so we don't try. The model intentionally keeps `flavor` as `Option<String>` because the API surfaces a default value even when `separate` is false.
+- **Build flavor (`App.build`)** mirrors the API's `buildFlavor` + `separateBuild`. `apply`:
+  - `separate: true, flavor: Some(F)` → `clever scale --build-flavor F`
+  - `separate: false` → `clever scale --build-flavor disabled` (yes, the literal string `disabled` is a valid value for that flag)
+  - `separate: true, flavor: None` → warn and skip
+
+  The diff in `plan::build_summary` collapses `separate: false` to a single "disabled" string regardless of the inert `flavor` value the API may have persisted — so drift only fires on real behaviour changes, not on the dead flavor field.
 
 ## Commits and PRs
 
