@@ -273,10 +273,15 @@ fn diff_build(file: &Build, live: Option<&Build>) -> Option<FieldDiff> {
 }
 
 fn build_summary(b: &Build) -> String {
-    let mode = if b.separate { "separate" } else { "inline" };
+    // When separate is false, the API still surfaces a `buildFlavor` value
+    // but it isn't used for anything — collapse that case into a single
+    // "disabled" string so drift only fires on actual behaviour changes.
+    if !b.separate {
+        return "disabled".into();
+    }
     match &b.flavor {
-        Some(f) => format!("{mode} {f}"),
-        None => mode.into(),
+        Some(f) => format!("separate {f}"),
+        None => "separate (no flavor)".into(),
     }
 }
 
@@ -968,6 +973,39 @@ mod tests {
                 assert!(
                     build_diff.is_some(),
                     "expected build drift, got {mutations:?}"
+                );
+            }
+            _ => panic!("expected Existing"),
+        }
+    }
+
+    #[test]
+    fn build_disabled_on_both_sides_is_no_drift_regardless_of_flavor() {
+        use crate::model::Build;
+        let mut project = empty_project();
+        let mut file_api = make_app("prod-api", "node");
+        // file says disabled with one inert flavor value
+        file_api.build = Some(Build {
+            separate: false,
+            flavor: Some("M".into()),
+        });
+        project.apps.insert("api".into(), file_api);
+
+        let mut live = empty_live();
+        let mut live_api = make_app("prod-api", "node");
+        // live also disabled, but the API persisted a different inert flavor
+        live_api.build = Some(Build {
+            separate: false,
+            flavor: Some("L".into()),
+        });
+        live.apps.insert("prod-api".into(), live_api);
+
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.apps[0].kind {
+            AppOpKind::Existing { mutations, .. } => {
+                assert!(
+                    mutations.iter().all(|d| d.field != "build"),
+                    "should not flag drift when both sides are disabled"
                 );
             }
             _ => panic!("expected Existing"),
