@@ -139,6 +139,7 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
                 dependencies,
                 config: IndexMap::new(),
                 env,
+                hooks: None,
             },
         );
     }
