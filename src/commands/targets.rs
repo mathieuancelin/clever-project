@@ -208,6 +208,7 @@ mod tests {
             apps: IndexMap::new(),
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
+            hooks: None,
         }
     }
 
@@ -222,6 +223,7 @@ mod tests {
             dependencies: deps.iter().map(|s| s.to_string()).collect(),
             config: IndexMap::new(),
             env: IndexMap::new(),
+            hooks: None,
         }
     }
 
