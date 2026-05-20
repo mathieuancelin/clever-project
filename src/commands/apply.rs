@@ -943,19 +943,20 @@ fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<bool> {
         clever.scale(app_id, scale)?;
     }
 
-    // build flavor — only push when the project file opts in to a separate
-    // build instance with an explicit flavor. Disabling separateBuild is not
-    // exposed by clever-tools, so we don't attempt it.
+    // build flavor — push when the project file declares a `build:` block.
+    // `clever scale --build-flavor disabled` turns the dedicated build
+    // instance off, so we can both enable (with a flavor) and disable.
     if let Some(build) = &app.build {
         if build.separate {
-            if let Some(flavor) = build.flavor.as_deref() {
-                clever.set_build_flavor(app_id, flavor)?;
-            } else {
-                warn!(
+            match build.flavor.as_deref() {
+                Some(flavor) => clever.set_build_flavor(app_id, flavor)?,
+                None => warn!(
                     "app `{}` build.separate is true but build.flavor is unset — skipping",
                     app.name
-                );
+                ),
             }
+        } else {
+            clever.set_build_flavor(app_id, "disabled")?;
         }
     }
 
