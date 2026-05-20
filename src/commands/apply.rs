@@ -148,6 +148,16 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         .map(|(_, v)| v.clone())
         .unwrap_or_else(|| "prod".to_string());
 
+    // Acquire the state lock before any mutation. Held by RAII guard until
+    // the end of this function (or until any error short-circuits the
+    // return). `--no-lock` is the explicit escape hatch.
+    let _lock_guard = if args.no_lock {
+        warn!("--no-lock passed — running without a state lock");
+        None
+    } else {
+        Some(crate::lock::acquire(state.path(), "apply", &file)?)
+    };
+
     let mut cache = OrgCache::new();
 
     // Phase 1 — addons.
