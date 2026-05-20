@@ -99,14 +99,14 @@ pub struct ApplyArgs {
     pub env: Option<String>,
 
     /// Set a variable (key=value). Overrides values from the project file
-    /// and from --variable-path.
+    /// and from --variables-file-path.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
 
     /// Load variable overrides from a YAML/JSON file (flat key/value
     /// mapping). Can be repeated; later files override earlier ones, and
     /// --variable beats anything from these files.
-    #[arg(long = "variable-path")]
+    #[arg(long = "variables-file-path")]
     pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file. When omitted, secrets are
@@ -161,12 +161,12 @@ pub struct CheckArgs {
     pub env: Option<String>,
 
     /// Set a variable (key=value). Overrides values from the project file
-    /// and from --variable-path.
+    /// and from --variables-file-path.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
 
     /// Load variable overrides from a YAML/JSON file (repeatable).
-    #[arg(long = "variable-path")]
+    #[arg(long = "variables-file-path")]
     pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file.
@@ -204,12 +204,12 @@ pub struct StatusArgs {
     pub env: Option<String>,
 
     /// Set a variable (key=value). Overrides values from the project file
-    /// and from --variable-path.
+    /// and from --variables-file-path.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
 
     /// Load variable overrides from a YAML/JSON file (repeatable).
-    #[arg(long = "variable-path")]
+    #[arg(long = "variables-file-path")]
     pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file.
@@ -249,14 +249,14 @@ pub struct DeleteArgs {
     pub env: Option<String>,
 
     /// Set a variable (key=value). Overrides values from the project file
-    /// and from --variable-path.
+    /// and from --variables-file-path.
     #[arg(long = "variable", value_parser = parse_kv)]
     pub variables: Vec<(String, String)>,
 
     /// Load variable overrides from a YAML/JSON file (flat key/value
     /// mapping). Can be repeated; later files override earlier ones, and
     /// --variable beats anything from these files.
-    #[arg(long = "variable-path")]
+    #[arg(long = "variables-file-path")]
     pub variable_paths: Vec<PathBuf>,
 
     /// Explicit path to a secrets file. When omitted, secrets are
