@@ -453,7 +453,9 @@ Compared fields:
 - **Addon**: `kind`, `region`, `size`.
 - **Network group**: members.
 
-Not compared (because `clever-tools` doesn't expose them in JSON read mode): `scalability`, `source.branch`, addon `version` / `backup_path` / `crypted`, app `config`.
+Not compared (because `clever-tools` doesn't expose them in JSON read mode): `source.branch`, addon `version` / `backup_path` / `crypted`, app `config`.
+
+`scalability` *is* compared, but only when the project file declares an explicit `scalability:` block (since `apply` won't touch the scaling config otherwise). Drift is reported as e.g. `fixed 1× XS → auto 1-4× S-M`. The live value comes from the per-app v2 endpoint, not `clever scale` (which has no read mode). Same rule for `build:` — drift surfaces as `inline M → separate L` when the project file opts in.
 
 ### `read`
 
@@ -525,6 +527,9 @@ apps:
         maxNumber: 2
         minSize: XS
         maxSize: S
+    build:                               # optional dedicated build instance
+      separate: true
+      flavor: M
     dependencies: [<other-project-key>, ...]
     env:
       KEY: value
@@ -873,7 +878,8 @@ JSON mode is non-interactive: `apply` and `delete` require `--yes` (no prompt), 
 - **`apply` is full-replace.** Existing apps have their env vars, domains, scalability and service links overwritten to match the project file. Domains served by `*.cleverapps.io` are never removed (they're auto-managed by Clever).
 - **Addons aren't updated** if they already exist (plan, version, etc. stay as-is). Only their existence is reconciled.
 - **`clever config`** isn't supported — `clever-tools` doesn't expose it as JSON. The `config:` field is parsed but ignored on both `read` and `apply`.
-- **`scalability` on `read` / `status`** isn't populated — `clever scale` has no read mode. `read` leaves it out; `status` skips it during drift comparison.
+- **`scalability` and `build` on `read` / `status`** are populated via the per-app v2 endpoint (`Clever::get_app_details`). That endpoint also returns the app's env vars and vhosts, so `read` and `status` fold env + domains + scalability + build into a single round-trip per app (instead of three separate calls). Services still come from a separate endpoint. `status` only flags scalability or build drift when the project file declares the corresponding block (mirrors apply's "don't touch if absent").
+- **Disabling separate build from the CLI** isn't possible — `clever scale --build-flavor` enables it but there's no first-party flag to turn it off. To disable, drop the `build:` block from the project file *and* clear the setting via the Clever console manually.
 - **`apply` is sequential** and stops at the first error (except on `delete`, which is best-effort and continues).
 - **Verbose logging**: pass `-v` / `--verbose` to see the underlying `clever` commands and per-step state lookups.
 
