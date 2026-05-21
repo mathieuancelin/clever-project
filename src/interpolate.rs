@@ -16,14 +16,50 @@ pub const RESERVED: &[&str] = &["env", "org", "region"];
 const MAX_RANDOM_SIZE: usize = 1024;
 
 static VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Two forms:
-    //   ${name}           — variable lookup (name may be dot-namespaced).
-    //   ${name(args)}     — function call (single identifier, no dots).
+    // Three forms:
+    //   ${name}                       — variable lookup (name may be dot-namespaced).
+    //   ${name(args)}                 — function call (single identifier, no dots).
+    //   ${apps.KEY.env.VAR}           — cross-resource ref, resolved in a
+    //   ${addons.KEY.env.VAR}           second pass against live Clever state.
+    //
     // The args capture group is `Some` only for the function form, even when
-    // empty (`${ulid()}`), which is how we distinguish the two at dispatch.
-    Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\(([^)]*)\))?\}")
+    // empty (`${ulid()}`), which is how we distinguish call vs lookup. Hyphens
+    // are allowed inside identifier segments because project keys can have
+    // them (e.g. `n8n-test-pg`).
+    Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)(?:\(([^)]*)\))?\}")
         .unwrap()
 });
+
+/// `${apps.KEY.env.VAR}` or `${addons.KEY.env.VAR}` — deferred to the
+/// post-snapshot resolution step. Returns the (kind, key, var) tuple if it
+/// matches the shape, else None.
+pub fn parse_cross_ref(name: &str) -> Option<(CrossRefKind, String, String)> {
+    let parts: Vec<&str> = name.splitn(4, '.').collect();
+    if parts.len() != 4 || parts[2] != "env" {
+        return None;
+    }
+    let kind = match parts[0] {
+        "apps" => CrossRefKind::App,
+        "addons" => CrossRefKind::Addon,
+        _ => return None,
+    };
+    if parts[1].is_empty() || parts[3].is_empty() {
+        return None;
+    }
+    Some((kind, parts[1].to_string(), parts[3].to_string()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CrossRefKind {
+    App,
+    Addon,
+}
+
+/// The same regex `Resolver` uses, exported so the post-snapshot pass can
+/// re-scan strings for deferred refs without duplicating the pattern.
+pub fn cross_ref_regex() -> &'static Regex {
+    &VAR_RE
+}
 
 /// Resolves `${name}` occurrences against a flat variable map.
 ///
@@ -117,6 +153,10 @@ impl Resolver {
                         String::new()
                     }
                 }
+            } else if parse_cross_ref(name).is_some() {
+                // Deferred — leave the literal `${apps.X.env.Y}` in place so
+                // the post-snapshot pass can resolve it against live state.
+                caps[0].to_string()
             } else {
                 match self.vars.get(name) {
                     Some(v) => v.clone(),
