@@ -765,6 +765,43 @@ addons:
     }
 
     #[test]
+    fn function_calls_in_env_values_get_resolved() {
+        let yaml = "\
+name: n8n-test
+org: orga_dummy
+region: par
+apps:
+  n8n:
+    name: n8n
+    kind: node
+    domains:
+      - n8n-${ulid_lowercase()}.cleverapps.io
+    env:
+      N8N_ENCRYPTION_KEY: ${random_alphanumeric(32)}
+      N8N_HOST: prefix-${ulid_lowercase()}.cleverapps.io
+display:
+  n8n-url: https://prefix-${ulid_lowercase()}.cleverapps.io/
+";
+        let p = write_tmp("yaml", yaml);
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
+        let app = project.apps.get("n8n").unwrap();
+        let key = app.env.get("N8N_ENCRYPTION_KEY").unwrap();
+        assert_eq!(key.len(), 32, "got `{key}`");
+        assert!(
+            !key.contains("${"),
+            "function not substituted, got: `{key}`"
+        );
+        let host = app.env.get("N8N_HOST").unwrap();
+        assert!(!host.contains("${"), "host not substituted: `{host}`");
+        assert!(host.starts_with("prefix-"));
+        assert!(host.ends_with(".cleverapps.io"));
+        assert!(!app.domains[0].contains("${"));
+        let url = project.display.get("n8n-url").unwrap();
+        assert!(!url.contains("${"), "display not substituted: `{url}`");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
     fn loads_and_resolves_spec_sample() {
         let p = write_tmp("yaml", SAMPLE);
         let (project, _r) =
