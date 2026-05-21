@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod check;
 pub mod completions;
+pub mod cross_refs;
 pub mod delete;
 pub mod diff;
 pub mod init;
