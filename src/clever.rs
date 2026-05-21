@@ -467,17 +467,38 @@ impl Clever {
     }
 
     /// Set the build-instance flavor. `clever scale --build-flavor <name>`
-    /// enables a dedicated build instance (separateBuild=true on the API
-    /// side) using the given flavor. There's no first-party way to *disable*
-    /// separate build from the CLI — once enabled, the user has to clear it
-    /// in the Clever console, so we only call this when the project file
-    /// opts in.
+    /// switches the dedicated build instance to `<name>`, or to `disabled`
+    /// to turn it off entirely.
     pub fn set_build_flavor(&self, app: &str, flavor: &str) -> Result<()> {
         if self.dry_run {
             info!("[dry-run] would set build flavor of `{app}` to `{flavor}`");
             return Ok(());
         }
         self.run(&["scale", "--app", app, "--build-flavor", flavor])
+    }
+
+    /// Set the git branch Clever pulls from on the next deploy. No first-
+    /// party `clever-tools` subcommand exposes this, so we hit the v2 API
+    /// directly via `clever curl -X PUT`.
+    pub fn set_branch(&self, org: &str, app_id: &str, branch: &str) -> Result<()> {
+        if self.dry_run {
+            info!("[dry-run] would set branch of `{app_id}` to `{branch}`");
+            return Ok(());
+        }
+        let url = format!(
+            "https://api.clever-cloud.com/v2/organisations/{org}/applications/{app_id}/branch"
+        );
+        let body = serde_json::json!({ "branch": branch }).to_string();
+        self.run(&[
+            "curl",
+            "-X",
+            "PUT",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            &url,
+        ])
     }
 
     /// Restart (or kick off the first deployment of) an application.
@@ -813,6 +834,8 @@ pub struct AppDetails {
     pub build_flavor: Option<AppFlavor>,
     #[serde(rename = "separateBuild", default)]
     pub separate_build: bool,
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -832,7 +855,7 @@ pub struct AppDetailsVhost {
     pub fqdn: String,
 }
 
-/// Decoded view of the per-app details endpoint. The four fields that
+/// Decoded view of the per-app details endpoint. The five fields that
 /// `read` / `status` need from a single round-trip, instead of the
 /// previous env + domain + scale trio.
 #[derive(Debug, Clone)]
@@ -844,6 +867,10 @@ pub struct AppDetailsView {
     /// — callers decide what to do with them.
     pub vhosts: Vec<String>,
     pub build: Option<crate::model::Build>,
+    /// Currently configured git branch (Clever pulls from this when the
+    /// user pushes to the deploy remote). `None` if the API doesn't return
+    /// one (e.g. apps with no source).
+    pub branch: Option<String>,
 }
 
 fn app_details_view_from(d: AppDetails) -> AppDetailsView {
@@ -862,6 +889,7 @@ fn app_details_view_from(d: AppDetails) -> AppDetailsView {
         env: d.env,
         vhosts,
         build,
+        branch: d.branch,
     }
 }
 
@@ -1063,6 +1091,37 @@ mod tests {
         let build = view.build.unwrap();
         assert!(build.separate);
         assert_eq!(build.flavor.as_deref(), Some("L"));
+    }
+
+    #[test]
+    fn app_details_view_extracts_branch() {
+        let raw = r#"{
+            "instance": {
+                "minInstances": 1,
+                "maxInstances": 1,
+                "minFlavor": {"name": "XS"},
+                "maxFlavor": {"name": "XS"}
+            },
+            "branch": "main"
+        }"#;
+        let d: AppDetails = serde_json::from_str(raw).unwrap();
+        let view = app_details_view_from(d);
+        assert_eq!(view.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn app_details_view_missing_branch_is_none() {
+        let raw = r#"{
+            "instance": {
+                "minInstances": 1,
+                "maxInstances": 1,
+                "minFlavor": {"name": "XS"},
+                "maxFlavor": {"name": "XS"}
+            }
+        }"#;
+        let d: AppDetails = serde_json::from_str(raw).unwrap();
+        let view = app_details_view_from(d);
+        assert!(view.branch.is_none());
     }
 
     #[test]
