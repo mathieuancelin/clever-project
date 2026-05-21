@@ -29,6 +29,12 @@ pub struct LiveSnapshot {
     pub live_app_names: BTreeSet<String>,
     pub live_addon_names: BTreeSet<String>,
     pub live_ng_names: BTreeSet<String>,
+    /// `name → app_id` for every app in the org. Used to resolve
+    /// `${apps.X.env.Y}` cross-refs (needs the id to call the env endpoint).
+    pub app_id_by_name: HashMap<String, String>,
+    /// `name → addon_id` for every addon in the org. Used to resolve
+    /// `${addons.X.env.Y}` cross-refs.
+    pub addon_id_by_name: HashMap<String, String>,
 }
 
 /// Snapshot the org, but only fetch detailed env / domains / services for
@@ -198,6 +204,14 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
     let live_app_names: BTreeSet<String> = all_apps.iter().map(|a| a.name.clone()).collect();
     let live_addon_names: BTreeSet<String> = all_addons.iter().map(|a| a.name.clone()).collect();
     let live_ng_names: BTreeSet<String> = all_ngs.iter().map(|n| n.label.clone()).collect();
+    let app_id_by_name: HashMap<String, String> = all_apps
+        .iter()
+        .map(|a| (a.name.clone(), a.app_id.clone()))
+        .collect();
+    let addon_id_by_name: HashMap<String, String> = all_addons
+        .iter()
+        .map(|a| (a.name.clone(), a.addon_id.clone()))
+        .collect();
 
     Ok(LiveSnapshot {
         apps,
@@ -207,6 +221,8 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
         live_app_names,
         live_addon_names,
         live_ng_names,
+        app_id_by_name,
+        addon_id_by_name,
     })
 }
 
