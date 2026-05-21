@@ -434,6 +434,8 @@ pub struct PlanJson<'a> {
     pub apps: &'a [AppOp],
     pub addons: &'a [AddonOp],
     pub network_groups: &'a [NgOp],
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub display: &'a IndexMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -495,6 +497,7 @@ pub fn to_json<'a>(plan: &'a Plan, project: &'a Project, targets: &Targets) -> P
         apps: &plan.apps,
         addons: &plan.addons,
         network_groups: &plan.network_groups,
+        display: &project.display,
     }
 }
 
@@ -550,6 +553,15 @@ pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
     }
     if plan.apps.is_empty() && plan.addons.is_empty() && plan.network_groups.is_empty() {
         let _ = writeln!(out, "  (project file is empty)");
+    }
+
+    if !project.display.is_empty() {
+        let _ = writeln!(out, "display:");
+        let width = project.display.keys().map(|k| k.len()).max().unwrap_or(0);
+        for (k, v) in &project.display {
+            let _ = writeln!(out, "  {k:<width$}  {v}");
+        }
+        let _ = writeln!(out);
     }
 
     out
@@ -790,6 +802,7 @@ mod tests {
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
             hooks: None,
+            display: IndexMap::new(),
         }
     }
 
