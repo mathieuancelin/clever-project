@@ -601,6 +601,32 @@ Always available, can't be redefined in `variables:`:
 - `${org}` — comes from the project file's `org` (or `--org`)
 - `${region}` — comes from the project file's `region` (or `--region`)
 
+### Cross-resource references
+
+You can pull a value from another app or addon's live env into a project app's `env:` block:
+
+```yaml
+apps:
+  worker:
+    env:
+      # Forward the PG host/password an addon injects into another app.
+      PG_HOST: ${apps.api.env.POSTGRESQL_ADDON_HOST}
+      PG_PASSWORD: ${apps.api.env.POSTGRESQL_ADDON_PASSWORD}
+      # Or read directly from the addon.
+      REDIS_URL: ${addons.cache.env.REDIS_URL}
+```
+
+The first part (`apps` or `addons`) picks the namespace, the second part is the **project key** (not the Clever name — though those often match), then `.env.` then the var name. Hyphens are allowed in project keys (`apps.n8n-test-pg.env.…`).
+
+**Resolution model.** These references aren't resolved at load time — they're left as `${…}` literals and substituted in a second pass against live Clever state, just before `apply` mutates anything. Source apps' "live env" includes vars Clever injects from linked addons (`POSTGRESQL_ADDON_HOST` etc.), so the most common use case — forwarding one app's addon credentials into a sibling — works in one ref.
+
+**Two-pass deployment.** If the source resource doesn't exist yet (first apply, addon not provisioned, etc.), the ref resolves to an empty string with a warning logged. Run `apply` again once the source is up and the value will populate. Same story if you reference a var that the source app doesn't expose (typo, addon not linked yet).
+
+**Restrictions.**
+- Cross-refs work in `env:` values only — not in `name:`, `domains:`, `dependencies:`, etc.
+- Resolved at `apply` and `status` time. `check --offline` doesn't see the live values and won't catch typos.
+- Re-evaluated on every `apply`/`status`. A rotating addon password will surface as drift the next time you run.
+
 ### Generator functions
 
 The interpolator also recognises `${name(args)}` to call built-in generators. Each occurrence produces a fresh value at load time.
