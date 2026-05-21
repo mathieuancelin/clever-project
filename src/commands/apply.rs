@@ -95,24 +95,33 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     // diff against the project file, and print the result. Always printed,
     // so the user (and `--dry-run`) see exactly what apply will do before
     // it touches anything.
-    let live = live_snapshot(&clever, &project.org, &project)
+    let mut live = live_snapshot(&clever, &project.org, &project)
         .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
 
-    // Second-pass interpolation: resolve `${apps.X.env.Y}` /
-    // `${addons.X.env.Y}` refs that were left as literals during load
-    // (because they need live state). Warnings are surfaced via tracing.
+    // Cross-resource ref resolution happens in TWO passes. This is the first:
+    // run against the current live state and against a CLONE of the project
+    // so the plan output reflects the values apply would push if no addon
+    // creation happened. The original `project` keeps the `${...}` literals
+    // so the same refs can be re-resolved after phase 1, once any addons in
+    // the same run have been created.
     let org_for_refs = project.org.clone();
-    crate::commands::cross_refs::resolve_in_project(&clever, &org_for_refs, &mut project, &live)
-        .with_context(|| "resolving cross-resource env references".to_string())?;
+    let mut project_for_plan = project.clone();
+    crate::commands::cross_refs::resolve_in_project(
+        &clever,
+        &org_for_refs,
+        &mut project_for_plan,
+        &live,
+    )
+    .with_context(|| "resolving cross-resource env references".to_string())?;
 
-    let plan = plan_mod::compute(&project, &live, &targets);
+    let plan = plan_mod::compute(&project_for_plan, &live, &targets);
 
     if args.format.is_json() {
-        let payload = plan_mod::to_json(&plan, &project, &targets);
+        let payload = plan_mod::to_json(&plan, &project_for_plan, &targets);
         let out = serde_json::to_string_pretty(&payload).context("serializing JSON plan")?;
         println!("{out}");
     } else {
-        print!("{}", plan_mod::render(&plan, &project, &targets));
+        print!("{}", plan_mod::render(&plan, &project_for_plan, &targets));
     }
 
     if args.dry_run {
@@ -200,6 +209,19 @@ pub fn run(args: ApplyArgs) -> Result<()> {
             addon_id_by_key.insert(key.clone(), id);
         }
     }
+
+    // Second cross-ref pass — now that phase 1 has created (or confirmed)
+    // every addon, their env endpoints are queryable. Merge the fresh ids
+    // into the snapshot's `addon_id_by_name` and re-resolve against the
+    // *original* project (which still carries the `${addons.X.env.Y}`
+    // literals). Phase 2 onwards will see the resolved values.
+    for (key, id) in &addon_id_by_key {
+        if let Some(addon) = project.addons.get(key) {
+            live.addon_id_by_name.insert(addon.name.clone(), id.clone());
+        }
+    }
+    crate::commands::cross_refs::resolve_in_project(&clever, &org_for_refs, &mut project, &live)
+        .with_context(|| "resolving cross-resource env references after phase 1".to_string())?;
 
     // Phase 2 — apps. Same targeted/lookup-only split as phase 1, but only
     // targeted apps get queued for phase 3/5 work.
