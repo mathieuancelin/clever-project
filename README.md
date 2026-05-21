@@ -334,7 +334,7 @@ The plan only counts as "to update" diffs that `apply` will actually rewrite: `e
 - existing app whose `env` was changed during the run,
 - existing app whose linked services (`dependencies`) were changed.
 
-Newly created apps *without* a GitHub source are not restarted (no code to deploy yet — push to the Clever remote yourself). Domain or scalability changes alone don't trigger a restart.
+Newly created apps *without* a GitHub source are not restarted (no code to deploy yet — push to the Clever remote yourself). Domain, scalability, build flavor or branch changes alone don't trigger a restart — a branch change only takes effect on the next push to the Clever remote.
 
 ### `delete`
 
@@ -453,9 +453,9 @@ Compared fields:
 - **Addon**: `kind`, `region`, `size`.
 - **Network group**: members.
 
-Not compared (because `clever-tools` doesn't expose them in JSON read mode): `source.branch`, addon `version` / `backup_path` / `crypted`, app `config`.
+Not compared (because `clever-tools` doesn't expose them in JSON read mode): addon `version` / `backup_path` / `crypted`, app `config`.
 
-`scalability` *is* compared, but only when the project file declares an explicit `scalability:` block (since `apply` won't touch the scaling config otherwise). Drift is reported as e.g. `fixed 1× XS → auto 1-4× S-M`. The live value comes from the per-app v2 endpoint, not `clever scale` (which has no read mode). Same rule for `build:` — drift surfaces as `disabled → separate L` (or the reverse) when the project file opts in. With `separate: false`, the flavor value is inert (Clever still stores one but doesn't use it), so it's not compared.
+`scalability`, `build` and `source.branch` *are* compared, but only when the project file declares the corresponding field. `apply` follows the same rule — it doesn't touch what isn't declared. Scalability drift looks like `fixed 1× XS → auto 1-4× S-M`; build drift like `disabled → separate L`; branch drift like `main → develop`. The live values come from the per-app v2 endpoint. For `build:` with `separate: false`, the inert flavor value Clever persists is not compared (only the on/off state matters).
 
 ### `read`
 
