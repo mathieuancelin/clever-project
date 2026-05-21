@@ -158,6 +158,7 @@ pub fn run(args: ReadArgs) -> Result<()> {
         addons,
         network_groups: IndexMap::new(),
         hooks: None,
+        display: IndexMap::new(),
     };
 
     project
