@@ -121,10 +121,10 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
             .filter(|h| !h.ends_with(".cleverapps.io"))
             .collect();
 
-        let source = listed
-            .deploy_url
-            .clone()
-            .map(|from| Source { from, branch: None });
+        let source = listed.deploy_url.clone().map(|from| Source {
+            from,
+            branch: details.branch.clone(),
+        });
 
         apps.insert(
             listed.name.clone(),
