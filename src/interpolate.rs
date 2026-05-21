@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 use anyhow::{Result, anyhow, bail};
 use indexmap::IndexMap;
+use rand::Rng;
 use regex::Regex;
 use serde_yaml::Value;
 
@@ -10,9 +11,18 @@ use crate::issues::{Issue, IssueSink};
 
 pub const RESERVED: &[&str] = &["env", "org", "region"];
 
+/// Upper bound on the size argument of `random_alphanumeric*` functions.
+/// Prevents accidentally allocating gigabytes via a typo.
+const MAX_RANDOM_SIZE: usize = 1024;
+
 static VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Identifiers, optionally dot-namespaced (`secrets.apikey`, `foo.bar.baz`).
-    Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}").unwrap()
+    // Two forms:
+    //   ${name}           — variable lookup (name may be dot-namespaced).
+    //   ${name(args)}     — function call (single identifier, no dots).
+    // The args capture group is `Some` only for the function form, even when
+    // empty (`${ulid()}`), which is how we distinguish the two at dispatch.
+    Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\(([^)]*)\))?\}")
+        .unwrap()
 });
 
 /// Resolves `${name}` occurrences against a flat variable map.
@@ -63,42 +73,61 @@ impl Resolver {
 
     #[allow(dead_code)]
     pub fn resolve_string(&self, s: &str) -> Result<String> {
-        let (out, missing) = self.resolve_string_inner(s);
-        if let Some(name) = missing.into_iter().next() {
-            return Err(anyhow!("undefined variable `{name}` (in `{s}`)"));
+        let (out, errors) = self.resolve_string_inner(s);
+        if let Some(msg) = errors.into_iter().next() {
+            return Err(anyhow!("{msg} (in `{s}`)"));
         }
         Ok(out)
     }
 
-    /// Same as resolve_string but pushes one issue per missing variable and
-    /// returns the partially-resolved string (with missing references left as
-    /// empty). Use this when the caller wants to surface every problem in one
-    /// pass instead of bailing on the first one.
+    /// Same as resolve_string but pushes one issue per problem encountered
+    /// (undefined variable, unknown function, bad function args) and returns
+    /// the partially-resolved string (with offending references left empty).
+    /// Use this when the caller wants to surface every problem in one pass
+    /// instead of bailing on the first one.
     pub fn resolve_string_collecting(&self, s: &str, issues: &mut Vec<Issue>) -> String {
-        let (out, missing) = self.resolve_string_inner(s);
-        for name in missing {
-            issues.push_issue(format!("undefined variable `{name}` (in `{s}`)"));
+        let (out, errors) = self.resolve_string_inner(s);
+        for msg in errors {
+            issues.push_issue(format!("{msg} (in `{s}`)"));
         }
         out
     }
 
-    /// Returns `(resolved, missing_names)`. The resolved string has missing
-    /// references replaced by empty so the walk can continue downstream.
+    /// Returns `(resolved, error_messages)`. The resolved string has
+    /// offending references replaced by empty so the walk can continue
+    /// downstream. Each error message is already formatted to be
+    /// human-readable (e.g. `undefined variable \`foo\``).
     fn resolve_string_inner(&self, s: &str) -> (String, Vec<String>) {
-        let mut missing: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        let mut record = |msg: String| {
+            if !errors.iter().any(|m| m == &msg) {
+                errors.push(msg);
+            }
+        };
         let result = VAR_RE.replace_all(s, |caps: &regex::Captures| {
             let name = &caps[1];
-            match self.vars.get(name) {
-                Some(v) => v.clone(),
-                None => {
-                    if !missing.iter().any(|n| n == name) {
-                        missing.push(name.to_string());
+            // A captured args group means it's a function call (parens were
+            // present in the source, even if empty: `${ulid()}`).
+            if let Some(args_match) = caps.get(2) {
+                let args = args_match.as_str();
+                match call_function(name, args) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        record(msg);
+                        String::new()
                     }
-                    String::new()
+                }
+            } else {
+                match self.vars.get(name) {
+                    Some(v) => v.clone(),
+                    None => {
+                        record(format!("undefined variable `{name}`"));
+                        String::new()
+                    }
                 }
             }
         });
-        (result.into_owned(), missing)
+        (result.into_owned(), errors)
     }
 
     /// Walk a YAML value and replace `${name}` inside every string. Mapping
@@ -123,6 +152,52 @@ impl Resolver {
             _ => {}
         }
     }
+}
+
+/// Dispatch table for `${name(args)}` function calls. Each invocation
+/// generates fresh values, so re-running `apply` on the same project file
+/// will produce drift on every run — these are best used as one-shot
+/// bootstrap helpers (initial secret, unique resource id) that you then
+/// pin via `read` once they're in place.
+fn call_function(name: &str, args: &str) -> std::result::Result<String, String> {
+    match name {
+        "ulid" => Ok(ulid::Ulid::new().to_string()),
+        "ulid_lowercase" => Ok(ulid::Ulid::new().to_string().to_lowercase()),
+        "uuid" => Ok(uuid::Uuid::new_v4().to_string().to_uppercase()),
+        "uuid_lowercase" => Ok(uuid::Uuid::new_v4().to_string()),
+        "random_alphanumeric" => {
+            let size = parse_size(name, args)?;
+            Ok(random_string(
+                size,
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            ))
+        }
+        "random_alphanumeric_lowercase" => {
+            let size = parse_size(name, args)?;
+            Ok(random_string(size, b"abcdefghijklmnopqrstuvwxyz0123456789"))
+        }
+        _ => Err(format!("unknown interpolation function `{name}`")),
+    }
+}
+
+fn parse_size(name: &str, args: &str) -> std::result::Result<usize, String> {
+    let trimmed = args.trim();
+    let size: usize = trimmed
+        .parse()
+        .map_err(|_| format!("function `{name}` expects a non-negative integer, got `{args}`"))?;
+    if size > MAX_RANDOM_SIZE {
+        return Err(format!(
+            "function `{name}` size `{size}` exceeds the max of {MAX_RANDOM_SIZE}"
+        ));
+    }
+    Ok(size)
+}
+
+fn random_string(size: usize, charset: &[u8]) -> String {
+    let mut rng = rand::rng();
+    (0..size)
+        .map(|_| charset[rng.random_range(0..charset.len())] as char)
+        .collect()
 }
 
 #[cfg(test)]
@@ -219,6 +294,139 @@ mod tests {
         let mut issues = Vec::new();
         r.resolve_value(&mut v, &mut issues);
         assert_eq!(issues.len(), 3, "got: {issues:#?}");
+    }
+
+    #[test]
+    fn ulid_function_returns_26_char_uppercase() {
+        let r = r(&[], "o", "par");
+        let v = r.resolve_string("id=${ulid()}").unwrap();
+        let id = v.strip_prefix("id=").unwrap();
+        assert_eq!(id.len(), 26);
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "got `{id}`"
+        );
+    }
+
+    #[test]
+    fn ulid_lowercase_function_returns_26_char_lowercase() {
+        let r = r(&[], "o", "par");
+        let v = r.resolve_string("${ulid_lowercase()}").unwrap();
+        assert_eq!(v.len(), 26);
+        assert!(
+            v.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "got `{v}`"
+        );
+    }
+
+    #[test]
+    fn uuid_function_returns_uppercase_hyphenated() {
+        let r = r(&[], "o", "par");
+        let v = r.resolve_string("${uuid()}").unwrap();
+        assert_eq!(v.len(), 36); // 32 hex + 4 hyphens
+        assert!(v.chars().filter(|c| *c == '-').count() == 4);
+        assert!(
+            v.chars()
+                .all(|c| c == '-' || c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "got `{v}`"
+        );
+    }
+
+    #[test]
+    fn uuid_lowercase_function_returns_lowercase_hyphenated() {
+        let r = r(&[], "o", "par");
+        let v = r.resolve_string("${uuid_lowercase()}").unwrap();
+        assert_eq!(v.len(), 36);
+        assert!(
+            v.chars()
+                .all(|c| c == '-' || c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "got `{v}`"
+        );
+    }
+
+    #[test]
+    fn random_alphanumeric_respects_size_and_mixed_case() {
+        let r = r(&[], "o", "par");
+        let v = r.resolve_string("${random_alphanumeric(32)}").unwrap();
+        assert_eq!(v.len(), 32);
+        assert!(v.chars().all(|c| c.is_ascii_alphanumeric()), "got `{v}`");
+    }
+
+    #[test]
+    fn random_alphanumeric_lowercase_respects_size_and_no_uppercase() {
+        let r = r(&[], "o", "par");
+        let v = r
+            .resolve_string("${random_alphanumeric_lowercase(40)}")
+            .unwrap();
+        assert_eq!(v.len(), 40);
+        assert!(
+            v.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "got `{v}`"
+        );
+    }
+
+    #[test]
+    fn each_call_yields_a_fresh_value() {
+        let r = r(&[], "o", "par");
+        let v = r.resolve_string("${uuid()}/${uuid()}").unwrap();
+        let (a, b) = v.split_once('/').unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn unknown_function_is_reported() {
+        let r = r(&[], "o", "par");
+        let err = r.resolve_string("${nope()}").unwrap_err().to_string();
+        assert!(err.contains("unknown interpolation function"));
+        assert!(err.contains("nope"));
+    }
+
+    #[test]
+    fn bad_random_size_is_reported() {
+        let r = r(&[], "o", "par");
+        let err = r
+            .resolve_string("${random_alphanumeric_lowercase(abc)}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expects a non-negative integer"));
+    }
+
+    #[test]
+    fn random_size_zero_is_empty() {
+        let r = r(&[], "o", "par");
+        let v = r.resolve_string("[${random_alphanumeric(0)}]").unwrap();
+        assert_eq!(v, "[]");
+    }
+
+    #[test]
+    fn random_size_over_max_is_rejected() {
+        let r = r(&[], "o", "par");
+        let err = r
+            .resolve_string("${random_alphanumeric(100000)}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds the max"));
+    }
+
+    #[test]
+    fn function_without_parens_falls_back_to_variable_lookup() {
+        // `${ulid}` (no parens) is just a variable lookup, not a function
+        // call. If the variable isn't defined, that's an undefined-var
+        // error — NOT an unknown-function error.
+        let r = r(&[], "o", "par");
+        let err = r.resolve_string("${ulid}").unwrap_err().to_string();
+        assert!(err.contains("undefined variable"));
+    }
+
+    #[test]
+    fn variables_and_functions_can_share_a_string() {
+        let r = r(&[("foo", "bar")], "o", "par");
+        let v = r.resolve_string("${foo}-${ulid_lowercase()}").unwrap();
+        assert!(v.starts_with("bar-"));
+        assert_eq!(v.len(), "bar-".len() + 26);
     }
 
     #[test]
