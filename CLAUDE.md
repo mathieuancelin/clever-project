@@ -59,7 +59,7 @@ Restart if and only if:
 - the app was just created **with** a GitHub source (kicks off first deploy), or
 - it already existed and `env` or `dependencies` changed.
 
-Created without GitHub → don't restart (no code yet). Domain or scalability changes alone don't trigger a restart.
+Created without GitHub → don't restart (no code yet). Domain, scalability, build flavor or branch changes alone don't trigger a restart. (A branch change in particular only matters at the next push to the Clever remote, so there's no point redeploying the current commit on a different branch label.)
 
 ### Dry-run
 
@@ -136,6 +136,7 @@ In `state.rs`:
 - **Variable interpolation is single-pass.** `variables.foo: ${bar}` won't expand `${bar}` before storage — only `${secrets.X}` is pre-expanded in variable values. Document this if it bites a user.
 - **`clever config` has no JSON mode** — the `config:` field in the model is parsed but ignored on both `read` and `apply`. Don't try to wire it up by parsing human output.
 - **`clever scale` has no read mode**, so `read` and `status` go through the per-app v2 endpoint (`Clever::get_app_details` → `/v2/organisations/{org}/applications/{app}`) which returns env + vhosts + scalability + buildFlavor + separateBuild in one call. `read` and `live::snapshot` use it to consolidate what used to be 3 separate API calls per app into one. `auto` on scalability is inferred: equal min/max on both count and flavor → `auto: false`; any range → `auto: true`. Scalability and build drift are reported by `status` only when the project file declares the corresponding block, matching apply's "don't touch if absent" behaviour.
+- **Git branch (`App.source.branch`)** is read from `AppDetails.branch` (top-level on the v2 endpoint) and written via `Clever::set_branch` → `clever curl -X PUT /v2/organisations/{org}/applications/{app}/branch -d '{"branch":"…"}'`. There's no first-party `clever-tools` subcommand for it. Same opt-in rule as scalability/build: `apply` only pushes when the project file pins a branch, and `status` only reports drift in that case.
 - **Build flavor (`App.build`)** mirrors the API's `buildFlavor` + `separateBuild`. `apply`:
   - `separate: true, flavor: Some(F)` → `clever scale --build-flavor F`
   - `separate: false` → `clever scale --build-flavor disabled` (yes, the literal string `disabled` is a valid value for that flag)
