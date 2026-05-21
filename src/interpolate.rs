@@ -95,6 +95,15 @@ impl Resolver {
         for (k, v) in cli_vars {
             vars.insert(k.clone(), v.clone());
         }
+        // Pre-evaluate generator functions inside variable values so the
+        // common pattern of declaring `slug: ${ulid_lowercase()}` works as
+        // expected — the function fires ONCE at build time and every
+        // `${slug}` reference gets the same value. Variable cross-refs and
+        // function-name typos are left as literals here; they'll surface
+        // again when the main resolver runs.
+        for v in vars.values_mut() {
+            *v = resolve_functions_only(v);
+        }
         vars.entry("env".to_string())
             .or_insert_with(|| "prod".to_string());
         vars.insert("org".to_string(), org);
@@ -192,6 +201,30 @@ impl Resolver {
             _ => {}
         }
     }
+}
+
+/// Run only the function-call branch of the interpolator on `s`. Plain
+/// variable lookups and deferred cross-refs are echoed back untouched —
+/// the regular resolver (in `resolve_string_inner`) handles those at the
+/// usage site. Used at resolver-build time to give variables a usable
+/// "one-shot evaluation" semantic for generator functions.
+fn resolve_functions_only(s: &str) -> String {
+    VAR_RE
+        .replace_all(s, |caps: &regex::Captures| {
+            if let Some(args_match) = caps.get(2) {
+                let name = &caps[1];
+                match call_function(name, args_match.as_str()) {
+                    Ok(v) => v,
+                    // Echo the literal on error; the main resolver will
+                    // report unknown-function / bad-args later when this
+                    // variable is referenced.
+                    Err(_) => caps[0].to_string(),
+                }
+            } else {
+                caps[0].to_string()
+            }
+        })
+        .into_owned()
 }
 
 /// Dispatch table for `${name(args)}` function calls. Each invocation
@@ -459,6 +492,55 @@ mod tests {
         let r = r(&[], "o", "par");
         let err = r.resolve_string("${ulid}").unwrap_err().to_string();
         assert!(err.contains("undefined variable"));
+    }
+
+    #[test]
+    fn function_in_variable_value_is_evaluated_once() {
+        // Mimics the user's pattern: `slug: ${ulid_lowercase()}` declared
+        // in `variables`, then referenced via `${slug}` in two env vars.
+        // Both references must get the SAME resolved value (shared slug),
+        // not the literal `${ulid_lowercase()}`.
+        let r = r(&[("slug", "${ulid_lowercase()}")], "o", "par");
+        let a = r.resolve_string("${slug}").unwrap();
+        let b = r.resolve_string("${slug}").unwrap();
+        assert_eq!(a.len(), 26, "slug not resolved, got `{a}`");
+        assert!(!a.contains("${"));
+        assert_eq!(a, b, "two references should share the same value");
+    }
+
+    #[test]
+    fn function_inside_a_complex_string_with_hyphens_and_dots() {
+        let r = r(&[], "o", "par");
+        let v = r
+            .resolve_string("n8n-workshop-iana-2026-${ulid_lowercase()}.cleverapps.io")
+            .unwrap();
+        assert!(v.starts_with("n8n-workshop-iana-2026-"));
+        assert!(v.ends_with(".cleverapps.io"));
+        // The ulid is 26 chars; total = "n8n-workshop-iana-2026-".len() + 26 + ".cleverapps.io".len()
+        assert_eq!(
+            v.len(),
+            "n8n-workshop-iana-2026-".len() + 26 + ".cleverapps.io".len()
+        );
+    }
+
+    #[test]
+    fn function_via_resolve_value_walks_yaml() {
+        let r = r(&[], "o", "par");
+        let mut v: Value = serde_yaml::from_str(
+            "env:\n  N8N_ENCRYPTION_KEY: ${random_alphanumeric(32)}\n  N8N_HOST: prefix-${ulid_lowercase()}.cleverapps.io\n"
+        ).unwrap();
+        let mut issues = Vec::new();
+        r.resolve_value(&mut v, &mut issues);
+        assert!(issues.is_empty(), "got issues: {issues:#?}");
+        let s = serde_yaml::to_string(&v).unwrap();
+        assert!(
+            !s.contains("${random_alphanumeric"),
+            "random not substituted, got:\n{s}"
+        );
+        assert!(
+            !s.contains("${ulid_lowercase"),
+            "ulid not substituted, got:\n{s}"
+        );
     }
 
     #[test]
