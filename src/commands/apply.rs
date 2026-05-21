@@ -633,7 +633,7 @@ fn handle_app(
             "updating app `{}` (from state, {id}) [project key: {key}]",
             app.name
         );
-        match update_app(clever, &id, app) {
+        match update_app(clever, &project.org, &id, app) {
             Ok(env_changed) => {
                 return Ok(AppOutcome {
                     id,
@@ -695,7 +695,7 @@ fn handle_app(
                 name: app.name.clone(),
             });
         }
-        let env_changed = update_app(clever, &found.app_id, app)?;
+        let env_changed = update_app(clever, &project.org, &found.app_id, app)?;
         return Ok(AppOutcome {
             id: found.app_id,
             just_created: false,
@@ -736,7 +736,7 @@ fn handle_app(
             name: app.name.clone(),
         });
     }
-    let env_changed = update_app(clever, &id, app)?;
+    let env_changed = update_app(clever, &project.org, &id, app)?;
     Ok(AppOutcome {
         id,
         just_created: true,
@@ -887,7 +887,7 @@ fn parse_github(url: &str) -> Result<Option<String>> {
 /// Apply the project's app config to a (real or synthetic) Clever app id.
 /// Returns whether the env vars actually changed, so the caller can decide
 /// to restart the app afterwards.
-fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<bool> {
+fn update_app(clever: &Clever, org: &str, app_id: &str, app: &App) -> Result<bool> {
     // env — replace only if the desired set differs from what's already
     // there. For freshly created (or synthetic dry-run) apps, the current
     // env is empty/defaults, so any non-empty desired env counts as a
@@ -958,6 +958,13 @@ fn update_app(clever: &Clever, app_id: &str, app: &App) -> Result<bool> {
         } else {
             clever.set_build_flavor(app_id, "disabled")?;
         }
+    }
+
+    // git branch — only push when the project file explicitly pins one.
+    // No restart is needed: the branch only affects the next deploy when
+    // the user pushes to the Clever remote.
+    if let Some(branch) = app.source.as_ref().and_then(|s| s.branch.as_deref()) {
+        clever.set_branch(org, app_id, branch)?;
     }
 
     Ok(env_changed)
