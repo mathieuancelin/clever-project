@@ -97,6 +97,14 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     // it touches anything.
     let live = live_snapshot(&clever, &project.org, &project)
         .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
+
+    // Second-pass interpolation: resolve `${apps.X.env.Y}` /
+    // `${addons.X.env.Y}` refs that were left as literals during load
+    // (because they need live state). Warnings are surfaced via tracing.
+    let org_for_refs = project.org.clone();
+    crate::commands::cross_refs::resolve_in_project(&clever, &org_for_refs, &mut project, &live)
+        .with_context(|| "resolving cross-resource env references".to_string())?;
+
     let plan = plan_mod::compute(&project, &live, &targets);
 
     if args.format.is_json() {
