@@ -637,9 +637,13 @@ apps:
 
 The first part (`apps` or `addons`) picks the namespace, the second part is the **project key** (not the Clever name — though those often match), then `.env.` then the var name. Hyphens are allowed in project keys (`apps.n8n-test-pg.env.…`).
 
-**Resolution model.** These references aren't resolved at load time — they're left as `${…}` literals and substituted in a second pass against live Clever state, just before `apply` mutates anything. Source apps' "live env" includes vars Clever injects from linked addons (`POSTGRESQL_ADDON_HOST` etc.), so the most common use case — forwarding one app's addon credentials into a sibling — works in one ref.
+**Resolution model.** These references aren't resolved at load time — they're left as `${…}` literals and substituted in a later pass against live Clever state. Source apps' "live env" includes vars Clever injects from linked addons (`POSTGRESQL_ADDON_HOST` etc.), so the most common use case — forwarding one app's addon credentials into a sibling — works in one ref.
 
-**Two-pass deployment.** If the source resource doesn't exist yet (first apply, addon not provisioned, etc.), the ref resolves to an empty string with a warning logged. Run `apply` again once the source is up and the value will populate. Same story if you reference a var that the source app doesn't expose (typo, addon not linked yet).
+**Addons created in the same run resolve in one apply.** `apply` resolves cross-refs *twice* internally: once before the plan output (against the pre-mutation snapshot, so the plan shows what would happen if nothing was created), and once again after the addon-creation phase. By then the new addons exist and the second pass picks up their real `POSTGRESQL_ADDON_HOST` etc. — so phase 2 (app create/update) pushes the resolved env in one go.
+
+**App→app cross-refs still need a second apply** when both apps are being created in the same run. The second pass only updates addon state; per-app cross-refs to apps being created in the same apply resolve to empty. Re-run `apply` once the source app exists.
+
+**Dry-run shows empty for to-be-created addons.** `--dry-run` only sees the pre-mutation snapshot. If your plan shows `+ DB_HOST = ""` for a cross-ref to an addon that's also being created, that's the dry-run quirk — the real apply will populate it.
 
 **Restrictions.**
 - Cross-refs work in `env:` values only — not in `name:`, `domains:`, `dependencies:`, etc.
