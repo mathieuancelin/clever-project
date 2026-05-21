@@ -390,8 +390,23 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     // surfaces as an apply error even though the mutations already landed.
     run_post_apply_hooks(&project, &targets, &file, &effective_env, args.skip_hooks)?;
 
+    if !project.display.is_empty() && !args.format.is_json() {
+        print!("{}", render_display(&project.display));
+    }
+
     info!("apply complete");
     Ok(())
+}
+
+fn render_display(display: &IndexMap<String, String>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str("\ndisplay:\n");
+    let width = display.keys().map(|k| k.len()).max().unwrap_or(0);
+    for (k, v) in display {
+        let _ = writeln!(out, "  {k:<width$}  {v}");
+    }
+    out
 }
 
 fn run_pre_apply_hooks(
