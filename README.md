@@ -558,6 +558,25 @@ network_groups:
 - Addon `kind`, `size`, and `region` are validated at the start of every `apply` against the live provider catalog returned by Clever's API (`clever curl /v2/products/addonproviders?orgaId=...`). Typos and unsupported combinations fail fast, before any mutation. Plan slug casing is normalized to the canonical value from the API (so `size: S_BIG` works even though Clever expects `s_big` for PostgreSQL). Skipped automatically when the project has no addons.
 - App `scalability.instances.minSize` / `maxSize` are validated at the start of every `apply` against the live instance catalog (`clever curl /v2/products/instances?for=...`). Unknown flavors are rejected with the list of valid sizes for that kind, and casing is normalized to Clever's canonical form (`s` → `S`, etc.). Skipped if no app declares a flavor.
 
+## Display block
+
+Top-level `display:` is a flat `Map<String, String>` of values surfaced at the end of `apply` (and inside the plan output, so you also see them with `--dry-run`). The same interpolation pipeline as `env:` applies — plain `${var}` lookups, generator functions, and cross-resource refs.
+
+```yaml
+display:
+  api_url:        https://${apps.api.name}.cleverapps.io
+  pg_host:        ${apps.api.env.POSTGRESQL_ADDON_HOST}
+  pg_password:    ${addons.db.env.POSTGRESQL_ADDON_PASSWORD}
+  session_secret: ${random_alphanumeric_lowercase(48)}
+```
+
+The block is rendered as aligned `key  value` pairs after a successful apply, and included verbatim in the `--format json` output under the `display` key.
+
+Notes:
+- `display` keys aren't variables — you can't reference them from elsewhere in the project. They're output-only.
+- Cross-refs (`${apps.X.env.Y}` / `${addons.X.env.Y}`) only resolve once the source resource is live. On the first apply, the source may not exist yet — the value comes out empty. Re-run `apply` once the source is up to populate it.
+- Values are not redacted. If you put `${addons.db.env.POSTGRESQL_ADDON_PASSWORD}` here, it will print to the terminal. Don't enable this on shared screens / CI logs that you don't control.
+
 ## Variables
 
 The `variables:` section supports two shapes — pick the one that fits.
