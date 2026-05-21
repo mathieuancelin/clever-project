@@ -209,6 +209,7 @@ mod tests {
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
             hooks: None,
+            display: IndexMap::new(),
         }
     }
 
