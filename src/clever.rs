@@ -513,13 +513,32 @@ impl Clever {
     }
 
     /// Restart (or kick off the first deployment of) an application.
-    /// Uses `--quiet` so we don't pollute the output with deployment logs.
+    ///
+    /// Fire-and-forget: the underlying `clever restart` is spawned and
+    /// detached, so apply doesn't block waiting for the deployment to
+    /// start. The HTTP call that triggers the restart is sent in the
+    /// child's first few hundred ms; if apply exits before that finishes
+    /// the child is reparented to init/launchd on Unix and runs to
+    /// completion on its own. Stdout/stderr are silenced so they don't
+    /// race with the rest of apply's output.
     pub fn restart(&self, app: &str) -> Result<()> {
         if self.dry_run {
             info!("[dry-run] would restart app `{app}`");
             return Ok(());
         }
-        self.run(&["restart", "--app", app, "--quiet"])
+        info!("kicking off restart of `{app}` (running in background)");
+        let _child = Command::new(&self.program)
+            .args(["restart", "--app", app, "--quiet"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawning `clever restart --app {app}`"))?;
+        // `_child` is dropped without `wait()`. On Unix that leaves a
+        // zombie until either we reap it (we don't) or the apply process
+        // exits — at which point the running child gets reparented to
+        // init/launchd and finishes on its own.
+        Ok(())
     }
 
     pub fn link_addon(&self, app: &str, addon: &str) -> Result<()> {
