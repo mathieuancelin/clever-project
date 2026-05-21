@@ -37,11 +37,15 @@ pub fn resolve_in_project(
     live: &LiveSnapshot,
 ) -> Result<Vec<String>> {
     // Scan for refs and figure out which (kind, key) pairs are referenced.
+    // We rescan both env values and `display` entries.
     let mut refs_by_kind: HashMap<(CrossRefKind, String), ()> = HashMap::new();
     for app in project.apps.values() {
         for value in app.env.values() {
             collect_refs(value, &mut refs_by_kind);
         }
+    }
+    for value in project.display.values() {
+        collect_refs(value, &mut refs_by_kind);
     }
 
     if refs_by_kind.is_empty() {
@@ -81,9 +85,9 @@ pub fn resolve_in_project(
         }
     }
 
-    // Second pass: substitute. `refs_by_kind` has already validated that
-    // every referenced project key exists in `project.apps` / `project.addons`,
-    // because `collect_refs` filters those. Unknown keys → warn + empty.
+    // Second pass: substitute env values then display values. `refs_by_kind`
+    // has already validated that every referenced project key exists; unknown
+    // keys → warn + empty.
     let app_keys: Vec<String> = project.apps.keys().cloned().collect();
     for key in app_keys {
         let env_clone: IndexMap<String, String> = project.apps[&key].env.clone();
@@ -94,6 +98,13 @@ pub fn resolve_in_project(
         }
         project.apps.get_mut(&key).unwrap().env = new_env;
     }
+    let display_clone: IndexMap<String, String> = project.display.clone();
+    let mut new_display: IndexMap<String, String> = IndexMap::new();
+    for (k, v) in display_clone {
+        let resolved = substitute_in(&v, &env_cache, project, &mut warnings);
+        new_display.insert(k, resolved);
+    }
+    project.display = new_display;
 
     Ok(warnings)
 }
@@ -247,6 +258,7 @@ mod tests {
             addons: IndexMap::new(),
             network_groups: IndexMap::new(),
             hooks: None,
+            display: IndexMap::new(),
         }
     }
 
@@ -326,6 +338,45 @@ mod tests {
         assert_eq!(out, "x=");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("unknown project key"));
+    }
+
+    #[test]
+    fn collect_refs_finds_refs_inside_display_values() {
+        // Sanity: a display value with cross-refs should also be picked up
+        // by collect_refs (caller is responsible for invoking it on display
+        // values too — this just verifies the scanner doesn't depend on
+        // location).
+        let mut out = HashMap::new();
+        collect_refs(
+            "postgres://${apps.api.env.PG_USER}@${apps.api.env.PG_HOST}/db",
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out.contains_key(&(CrossRefKind::App, "api".to_string())));
+    }
+
+    #[test]
+    fn resolve_in_project_substitutes_display_values_too() {
+        let mut project = empty_project();
+        let mut app = empty_app("prod-api");
+        app.env.insert(
+            "WORKER_PG".into(),
+            "${apps.api.env.POSTGRESQL_ADDON_HOST}".into(),
+        );
+        project.apps.insert("api".into(), app);
+        project.display.insert(
+            "pg_host".into(),
+            "${apps.api.env.POSTGRESQL_ADDON_HOST}".into(),
+        );
+
+        // Direct unit test of substitute_in (skipping live fetch).
+        let mut env = IndexMap::new();
+        env.insert("POSTGRESQL_ADDON_HOST".into(), "10.0.0.5".into());
+        let cache = HashMap::from([((CrossRefKind::App, "api".to_string()), env)]);
+        let mut warnings = Vec::new();
+        let resolved = substitute_in(&project.display["pg_host"], &cache, &project, &mut warnings);
+        assert_eq!(resolved, "10.0.0.5");
+        assert!(warnings.is_empty());
     }
 
     #[test]
