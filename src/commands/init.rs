@@ -405,6 +405,7 @@ fn build_project(inputs: &Inputs) -> Project {
         addons,
         network_groups: IndexMap::new(),
         hooks: None,
+        display: IndexMap::new(),
     }
 }
 
