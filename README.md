@@ -671,6 +671,25 @@ apps:
 
 **Caveat — non-determinism.** These functions return a different value on every load. If you write `${uuid()}` in your project file and run `apply` twice, the second run will see drift on the env var and trigger a restart. Treat them as **one-shot bootstrap helpers**: generate the value on first apply, then `clever-project read` to pin the resolved value into your project file (or extract it into a `.secrets` sidecar).
 
+**Tip — share one generated value across multiple references.** Functions called *directly* inside multiple env values fire independently:
+
+```yaml
+env:
+  N8N_HOST: app-${ulid_lowercase()}.cleverapps.io   # ulid A
+  WEBHOOK_URL: https://app-${ulid_lowercase()}.cleverapps.io/   # ulid B (different)
+```
+
+To share, declare the function in a variable — it's evaluated *once* at resolver-build time, and every `${slug}` reference picks up the same value:
+
+```yaml
+variables:
+  common:
+    slug: ${ulid_lowercase()}
+env:
+  N8N_HOST: app-${slug}.cleverapps.io
+  WEBHOOK_URL: https://app-${slug}.cleverapps.io/
+```
+
 ### Loading variables from a file
 
 The variables file can be YAML, JSON or TOML — same flat shape, format detected from the extension.
