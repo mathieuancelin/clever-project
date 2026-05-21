@@ -254,6 +254,24 @@ fn diff_app_mutable(file: &App, live: &App) -> Vec<FieldDiff> {
             diffs.push(d);
         }
     }
+    // Branch: only surface drift when the file pins one (matches apply,
+    // which only pushes branches that are explicitly declared).
+    if let Some(file_branch) = file.source.as_ref().and_then(|s| s.branch.as_deref()) {
+        let live_branch = live
+            .source
+            .as_ref()
+            .and_then(|s| s.branch.as_deref())
+            .unwrap_or("");
+        if file_branch != live_branch {
+            diffs.push(FieldDiff {
+                field: "source.branch".into(),
+                body: DiffBody::Scalar {
+                    file: file_branch.to_string(),
+                    live: live_branch.to_string(),
+                },
+            });
+        }
+    }
     diffs
 }
 
@@ -1032,6 +1050,63 @@ mod tests {
         match &plan.apps[0].kind {
             AppOpKind::Existing { mutations, .. } => {
                 assert!(mutations.iter().all(|d| d.field != "build"));
+            }
+            _ => panic!("expected Existing"),
+        }
+    }
+
+    #[test]
+    fn branch_drift_surfaces_when_file_pins_branch() {
+        use crate::model::Source;
+        let mut project = empty_project();
+        let mut file_api = make_app("prod-api", "node");
+        file_api.source = Some(Source {
+            from: "https://github.com/me/api.git".into(),
+            branch: Some("main".into()),
+        });
+        project.apps.insert("api".into(), file_api);
+
+        let mut live = empty_live();
+        let mut live_api = make_app("prod-api", "node");
+        live_api.source = Some(Source {
+            from: "https://github.com/me/api.git".into(),
+            branch: Some("develop".into()),
+        });
+        live.apps.insert("prod-api".into(), live_api);
+
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.apps[0].kind {
+            AppOpKind::Existing { mutations, .. } => {
+                let d = mutations.iter().find(|d| d.field == "source.branch");
+                assert!(d.is_some(), "expected branch drift, got {mutations:?}");
+            }
+            _ => panic!("expected Existing"),
+        }
+    }
+
+    #[test]
+    fn branch_no_drift_when_file_does_not_pin_one() {
+        use crate::model::Source;
+        let mut project = empty_project();
+        let mut file_api = make_app("prod-api", "node");
+        file_api.source = Some(Source {
+            from: "https://github.com/me/api.git".into(),
+            branch: None,
+        });
+        project.apps.insert("api".into(), file_api);
+
+        let mut live = empty_live();
+        let mut live_api = make_app("prod-api", "node");
+        live_api.source = Some(Source {
+            from: "https://github.com/me/api.git".into(),
+            branch: Some("main".into()),
+        });
+        live.apps.insert("prod-api".into(), live_api);
+
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.apps[0].kind {
+            AppOpKind::Existing { mutations, .. } => {
+                assert!(mutations.iter().all(|d| d.field != "source.branch"));
             }
             _ => panic!("expected Existing"),
         }
