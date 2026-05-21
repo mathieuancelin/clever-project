@@ -601,6 +601,31 @@ Always available, can't be redefined in `variables:`:
 - `${org}` — comes from the project file's `org` (or `--org`)
 - `${region}` — comes from the project file's `region` (or `--region`)
 
+### Generator functions
+
+The interpolator also recognises `${name(args)}` to call built-in generators. Each occurrence produces a fresh value at load time.
+
+| Function | Result |
+|---|---|
+| `${ulid()}` | 26-char uppercase ULID (Crockford Base32) |
+| `${ulid_lowercase()}` | same, lowercased |
+| `${uuid()}` | uppercase hyphenated UUID v4 |
+| `${uuid_lowercase()}` | standard lowercase hyphenated UUID v4 |
+| `${random_alphanumeric(N)}` | `N` random chars, mixed-case `[A-Za-z0-9]` |
+| `${random_alphanumeric_lowercase(N)}` | `N` random chars, `[a-z0-9]` only |
+
+The size argument is capped at 1024 to catch typos. Unknown function names and bad arguments surface as load-time errors the same way undefined variables do.
+
+```yaml
+apps:
+  api:
+    env:
+      SESSION_SECRET: ${random_alphanumeric_lowercase(64)}
+      REQUEST_ID_PREFIX: ${ulid_lowercase()}
+```
+
+**Caveat — non-determinism.** These functions return a different value on every load. If you write `${uuid()}` in your project file and run `apply` twice, the second run will see drift on the env var and trigger a restart. Treat them as **one-shot bootstrap helpers**: generate the value on first apply, then `clever-project read` to pin the resolved value into your project file (or extract it into a `.secrets` sidecar).
+
 ### Loading variables from a file
 
 The variables file can be YAML, JSON or TOML — same flat shape, format detected from the extension.
