@@ -74,6 +74,12 @@ pub struct Project {
     pub network_groups: IndexMap<String, NetworkGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<Hooks>,
+    /// Key/value pairs surfaced at the end of `apply` (and in `--dry-run`
+    /// plan output). Values go through the same interpolation pipeline as
+    /// env vars — including cross-resource refs like `${apps.X.env.Y}` —
+    /// so you can print resolved URLs, addon credentials, etc.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub display: IndexMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -983,6 +989,7 @@ size = "xs_sml"
             },
             network_groups: IndexMap::new(),
             hooks: None,
+            display: IndexMap::new(),
         };
 
         let mut p = std::env::temp_dir();
