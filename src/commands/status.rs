@@ -30,7 +30,7 @@ pub fn run(args: StatusArgs) -> Result<()> {
     }
 
     let file = resolve_project_file(args.file, &std::env::current_dir()?)?;
-    let (project, _resolver) = Project::load_and_resolve(
+    let (mut project, _resolver) = Project::load_and_resolve(
         &file,
         args.org,
         args.region,
@@ -45,6 +45,10 @@ pub fn run(args: StatusArgs) -> Result<()> {
     let clever = Clever::new()?;
     let live = live_snapshot(&clever, &project.org, &project)
         .with_context(|| format!("reading live snapshot of org `{}`", project.org))?;
+
+    let org_for_refs = project.org.clone();
+    crate::commands::cross_refs::resolve_in_project(&clever, &org_for_refs, &mut project, &live)
+        .with_context(|| "resolving cross-resource env references".to_string())?;
 
     let report = compute_report(&project, &live, &state);
 
@@ -805,6 +809,8 @@ mod tests {
             live_app_names,
             live_addon_names: Default::default(),
             live_ng_names: Default::default(),
+            app_id_by_name: Default::default(),
+            addon_id_by_name: Default::default(),
         };
 
         // Hand-built state that tracks the orphan app.
