@@ -177,19 +177,30 @@ impl Clever {
     }
 
     pub fn get_env(&self, app: &str) -> Result<Vec<EnvVar>> {
-        #[derive(Deserialize)]
-        struct EnvOut {
-            env: Vec<EnvVar>,
-            #[allow(dead_code)]
-            #[serde(default)]
-            from_addons: serde_json::Value,
-            #[allow(dead_code)]
-            #[serde(default)]
-            from_dependencies: serde_json::Value,
-        }
-        let json = self.run_json(&["env", "--app", app, "--format", "json"])?;
-        let out: EnvOut = serde_json::from_value(json).context("decoding `env` output")?;
+        let out = self.get_env_full(app)?;
         Ok(out.env)
+    }
+
+    /// Like `get_env` but also returns the addon- and dependency-injected
+    /// vars that Clever merges into the app's runtime env (so callers can
+    /// resolve cross-refs like `${apps.X.env.POSTGRESQL_ADDON_HOST}` where
+    /// the var is auto-populated by a linked addon).
+    pub fn get_env_full(&self, app: &str) -> Result<EnvFull> {
+        let json = self.run_json(&["env", "--app", app, "--format", "json"])?;
+        serde_json::from_value(json).context("decoding `env` output")
+    }
+
+    /// Fetch the env vars an addon would inject into any linked app
+    /// (POSTGRESQL_ADDON_HOST, REDIS_HOST, etc.). Uses the v2 API endpoint
+    /// rather than `clever addon env` because the latter does not return
+    /// structured JSON we can rely on.
+    pub fn get_addon_env(&self, org: &str, addon_id: &str) -> Result<IndexMap<String, String>> {
+        let url =
+            format!("https://api.clever-cloud.com/v2/organisations/{org}/addons/{addon_id}/env");
+        let json = self.run_json(&["curl", &url])?;
+        let entries: Vec<EnvVar> =
+            serde_json::from_value(json).context("decoding addon env output")?;
+        Ok(entries.into_iter().map(|v| (v.name, v.value)).collect())
     }
 
     pub fn get_domains(&self, app: &str) -> Result<Vec<Domain>> {
@@ -757,6 +768,75 @@ pub struct NetworkGroupMember {
 pub struct EnvVar {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct EnvFull {
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
+    #[serde(default, deserialize_with = "deserialize_injected_env")]
+    pub from_addons: Vec<EnvVar>,
+    #[serde(default, deserialize_with = "deserialize_injected_env")]
+    pub from_dependencies: Vec<EnvVar>,
+}
+
+impl EnvFull {
+    /// Flatten the three categories into one map. Order of precedence:
+    /// dependencies < addons < user, so user-set vars always win on a name
+    /// collision. Mirrors the runtime view an app process actually sees.
+    pub fn merged(&self) -> IndexMap<String, String> {
+        let mut out = IndexMap::new();
+        for v in &self.from_dependencies {
+            out.insert(v.name.clone(), v.value.clone());
+        }
+        for v in &self.from_addons {
+            out.insert(v.name.clone(), v.value.clone());
+        }
+        for v in &self.env {
+            out.insert(v.name.clone(), v.value.clone());
+        }
+        out
+    }
+}
+
+/// `clever env` returns `from_addons` / `from_dependencies` either as a
+/// flat list of `{name, value}` or as a nested map keyed by source name
+/// (the shape depends on the clever-tools version). This deserializer
+/// flattens both forms into a single `Vec<EnvVar>`.
+fn deserialize_injected_env<'de, D>(de: D) -> std::result::Result<Vec<EnvVar>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(de)?;
+    let mut out: Vec<EnvVar> = Vec::new();
+    match value {
+        serde_json::Value::Null => {}
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Ok(v) = serde_json::from_value::<EnvVar>(item) {
+                    out.push(v);
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // Either `{ "name": "VALUE" }` or `{ "source": [{name, value}] }`.
+            for (k, v) in map {
+                match v {
+                    serde_json::Value::String(s) => out.push(EnvVar { name: k, value: s }),
+                    serde_json::Value::Array(items) => {
+                        for item in items {
+                            if let Ok(v) = serde_json::from_value::<EnvVar>(item) {
+                                out.push(v);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Deserialize)]
