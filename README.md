@@ -622,7 +622,7 @@ Always available, can't be redefined in `variables:`:
 
 ### Cross-resource references
 
-You can pull a value from another app or addon's live env into a project app's `env:` block:
+You can pull a value from another app or addon's live env into a project app's `env:` block — or from an addon's provider-specific metadata for managed services that expose more than just env vars:
 
 ```yaml
 apps:
@@ -631,11 +631,23 @@ apps:
       # Forward the PG host/password an addon injects into another app.
       PG_HOST: ${apps.api.env.POSTGRESQL_ADDON_HOST}
       PG_PASSWORD: ${apps.api.env.POSTGRESQL_ADDON_PASSWORD}
-      # Or read directly from the addon.
+      # Or read directly from the addon's env endpoint.
       REDIS_URL: ${addons.cache.env.REDIS_URL}
+      # Or from the addon's v4 metadata endpoint (`.addon.<dotted.path>`),
+      # for managed services like otoroshi / keycloak / matomo / metabase
+      # that expose credentials and connection URLs there.
+      OTO_USER:     ${addons.otoroshi.addon.initialCredentials.user}
+      OTO_PASSWORD: ${addons.otoroshi.addon.initialCredentials.password}
+      OTO_API_URL:  ${addons.otoroshi.addon.api.url}
 ```
 
-The first part (`apps` or `addons`) picks the namespace, the second part is the **project key** (not the Clever name — though those often match), then `.env.` then the var name. Hyphens are allowed in project keys (`apps.n8n-test-pg.env.…`).
+The first part (`apps` or `addons`) picks the namespace, the second part is the **project key** (not the Clever name — though those often match), the third part picks the source: `env` for a runtime env var, or `addon` for a field of the v4 provider metadata. The remaining segments are joined with `.` to form the lookup key:
+
+- `${apps.KEY.env.VAR}`            — fetch `VAR` from the app's live env (includes vars Clever injects from linked addons)
+- `${addons.KEY.env.VAR}`          — fetch `VAR` from the addon's env endpoint
+- `${addons.KEY.addon.a.b.c}`      — fetch `a.b.c` from the provider-specific metadata JSON (only meaningful for managed services that expose this endpoint — otoroshi, keycloak, matomo, metabase; database addons return 404 and fall back to empty + warning)
+
+Hyphens are allowed in project keys (`apps.n8n-test-pg.env.…`).
 
 **Resolution model.** These references aren't resolved at load time — they're left as `${…}` literals and substituted in a later pass against live Clever state. Source apps' "live env" includes vars Clever injects from linked addons (`POSTGRESQL_ADDON_HOST` etc.), so the most common use case — forwarding one app's addon credentials into a sibling — works in one ref.
 
