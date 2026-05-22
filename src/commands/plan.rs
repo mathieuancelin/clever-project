@@ -507,7 +507,7 @@ pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
     let mut to_create = 0;
     let mut to_update = 0;
     let mut unchanged = 0;
-    out.push_str("\n");
+    out.push('\n');
     for o in &plan.apps {
         match &o.kind {
             AppOpKind::Create { .. } => to_create += 1,
@@ -565,7 +565,7 @@ pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
         let _ = writeln!(out);
     }
 
-    out.push_str("\n");
+    out.push('\n');
     out
 }
 
