@@ -203,6 +203,27 @@ impl Clever {
         Ok(entries.into_iter().map(|v| (v.name, v.value)).collect())
     }
 
+    /// Fetch the provider-specific metadata JSON for an addon. The shape
+    /// varies per provider (otoroshi exposes `initialCredentials` + `api`,
+    /// keycloak / matomo / metabase have their own fields). Returns the raw
+    /// JSON for the caller to walk via a dot-path; the resolver decides
+    /// what to do with missing fields.
+    ///
+    /// The v4 endpoint expects an `addon-X` provider id, whereas the v2
+    /// listing returns the bare form (`otoroshi`, `matomo`, etc.). We
+    /// normalize by prefixing `addon-` when it isn't already present —
+    /// works for the managed-service providers that actually expose this
+    /// endpoint. Database-style providers (`postgresql-addon`,
+    /// `redis-addon`, ...) don't have a v4 metadata endpoint at all and
+    /// will 404 here; the caller surfaces that as a warning + empty.
+    pub fn get_addon_meta(&self, provider_id: &str, real_id: &str) -> Result<serde_json::Value> {
+        let v4_provider = normalize_v4_provider_id(provider_id);
+        let url = format!(
+            "https://api.clever-cloud.com/v4/addon-providers/{v4_provider}/addons/{real_id}"
+        );
+        self.run_json(&["curl", &url])
+    }
+
     pub fn get_domains(&self, app: &str) -> Result<Vec<Domain>> {
         let json = self.run_json(&["domain", "--app", app, "--format", "json"])?;
         serde_json::from_value(json).context("decoding `domain` output")
@@ -644,6 +665,22 @@ impl Clever {
     }
 }
 
+/// Map a v2 addon `providerId` to the `addon-X` form the v4 metadata
+/// endpoint expects. v2 ids come in three flavours:
+///   - already prefixed: `addon-matomo`, `addon-pulsar` → returned as-is
+///   - bare canonical name: `otoroshi`, `keycloak`, `metabase` → prefixed
+///   - suffixed DB style: `postgresql-addon`, `redis-addon` → also prefixed
+///     (becomes `addon-postgresql-addon`, which 404s because those
+///     providers don't expose a v4 metadata endpoint — that's fine, the
+///     caller turns the 404 into a warning + empty)
+fn normalize_v4_provider_id(provider_id: &str) -> String {
+    if provider_id.starts_with("addon-") {
+        provider_id.to_string()
+    } else {
+        format!("addon-{provider_id}")
+    }
+}
+
 fn is_transient_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     const PATTERNS: &[&str] = &[
@@ -1066,6 +1103,19 @@ mod tests {
         assert!(d1.as_millis() >= 100 && d1.as_millis() < 300);
         assert!(d2.as_millis() >= 200 && d2.as_millis() < 400);
         assert!(d3.as_millis() >= 400 && d3.as_millis() < 600);
+    }
+
+    #[test]
+    fn normalize_v4_provider_id_prefixes_bare_names() {
+        assert_eq!(normalize_v4_provider_id("otoroshi"), "addon-otoroshi");
+        assert_eq!(normalize_v4_provider_id("keycloak"), "addon-keycloak");
+        assert_eq!(normalize_v4_provider_id("metabase"), "addon-metabase");
+    }
+
+    #[test]
+    fn normalize_v4_provider_id_leaves_already_prefixed_alone() {
+        assert_eq!(normalize_v4_provider_id("addon-matomo"), "addon-matomo");
+        assert_eq!(normalize_v4_provider_id("addon-pulsar"), "addon-pulsar");
     }
 
     #[test]
