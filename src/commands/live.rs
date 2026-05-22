@@ -32,9 +32,19 @@ pub struct LiveSnapshot {
     /// `name → app_id` for every app in the org. Used to resolve
     /// `${apps.X.env.Y}` cross-refs (needs the id to call the env endpoint).
     pub app_id_by_name: HashMap<String, String>,
-    /// `name → addon_id` for every addon in the org. Used to resolve
-    /// `${addons.X.env.Y}` cross-refs.
-    pub addon_id_by_name: HashMap<String, String>,
+    /// `name → AddonLookup` for every addon in the org. Used to resolve
+    /// both `${addons.X.env.Y}` (needs `addon_id`) and
+    /// `${addons.X.addon.path}` (needs `provider_id` + `real_id`) refs.
+    pub addon_lookup_by_name: HashMap<String, AddonLookup>,
+}
+
+/// Everything the cross-ref resolver needs about a live addon to fetch its
+/// env or its provider-specific metadata.
+#[derive(Debug, Clone)]
+pub struct AddonLookup {
+    pub addon_id: String,
+    pub real_id: String,
+    pub provider_id: String,
 }
 
 /// Snapshot the org, but only fetch detailed env / domains / services for
@@ -208,9 +218,18 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
         .iter()
         .map(|a| (a.name.clone(), a.app_id.clone()))
         .collect();
-    let addon_id_by_name: HashMap<String, String> = all_addons
+    let addon_lookup_by_name: HashMap<String, AddonLookup> = all_addons
         .iter()
-        .map(|a| (a.name.clone(), a.addon_id.clone()))
+        .map(|a| {
+            (
+                a.name.clone(),
+                AddonLookup {
+                    addon_id: a.addon_id.clone(),
+                    real_id: a.real_id.clone(),
+                    provider_id: a.provider_id.clone(),
+                },
+            )
+        })
         .collect();
 
     Ok(LiveSnapshot {
@@ -222,7 +241,7 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
         live_addon_names,
         live_ng_names,
         app_id_by_name,
-        addon_id_by_name,
+        addon_lookup_by_name,
     })
 }
 
