@@ -30,25 +30,43 @@ static VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
-/// `${apps.KEY.env.VAR}` or `${addons.KEY.env.VAR}` — deferred to the
-/// post-snapshot resolution step. Returns the (kind, key, var) tuple if it
-/// matches the shape, else None.
-pub fn parse_cross_ref(name: &str) -> Option<(CrossRefKind, String, String)> {
-    let parts: Vec<&str> = name.splitn(4, '.').collect();
-    if parts.len() != 4 || parts[2] != "env" {
+/// A cross-resource reference, deferred to the post-snapshot resolution
+/// pass. Three shapes are supported:
+///   `${apps.KEY.env.VAR}`            → `AppEnv`
+///   `${addons.KEY.env.VAR}`          → `AddonEnv`
+///   `${addons.KEY.addon.<dot.path>}` → `AddonMeta` (fetched from the v4
+///                                       provider-specific endpoint)
+pub fn parse_cross_ref(name: &str) -> Option<CrossRef> {
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.len() < 4 || parts.iter().any(|p| p.is_empty()) {
         return None;
     }
-    let kind = match parts[0] {
-        "apps" => CrossRefKind::App,
-        "addons" => CrossRefKind::Addon,
-        _ => return None,
-    };
-    if parts[1].is_empty() || parts[3].is_empty() {
-        return None;
+    match (parts[0], parts[2]) {
+        ("apps", "env") if parts.len() == 4 => Some(CrossRef::AppEnv {
+            key: parts[1].to_string(),
+            var: parts[3].to_string(),
+        }),
+        ("addons", "env") if parts.len() == 4 => Some(CrossRef::AddonEnv {
+            key: parts[1].to_string(),
+            var: parts[3].to_string(),
+        }),
+        ("addons", "addon") => Some(CrossRef::AddonMeta {
+            key: parts[1].to_string(),
+            path: parts[3..].iter().map(|s| s.to_string()).collect(),
+        }),
+        _ => None,
     }
-    Some((kind, parts[1].to_string(), parts[3].to_string()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CrossRef {
+    AppEnv { key: String, var: String },
+    AddonEnv { key: String, var: String },
+    AddonMeta { key: String, path: Vec<String> },
+}
+
+/// Coarse classification used by the env-fetching cache: an `AppEnv` /
+/// `AddonEnv` pair share a cache slot per `(kind, key)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CrossRefKind {
     App,
