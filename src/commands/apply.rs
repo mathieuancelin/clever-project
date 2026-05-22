@@ -210,14 +210,23 @@ pub fn run(args: ApplyArgs) -> Result<()> {
         }
     }
 
-    // Second cross-ref pass — now that phase 1 has created (or confirmed)
-    // every addon, their env endpoints are queryable. Merge the fresh ids
-    // into the snapshot's `addon_id_by_name` and re-resolve against the
-    // *original* project (which still carries the `${addons.X.env.Y}`
-    // literals). Phase 2 onwards will see the resolved values.
-    for (key, id) in &addon_id_by_key {
-        if let Some(addon) = project.addons.get(key) {
-            live.addon_id_by_name.insert(addon.name.clone(), id.clone());
+    // Second cross-ref pass — phase 1 has now created (or confirmed) every
+    // addon, so both env and the v4 provider-specific metadata endpoint
+    // are queryable. We need realId + providerId to reach the metadata
+    // endpoint, so we refresh the addon listing once (cheap, one API call)
+    // and rebuild `addon_lookup_by_name` from it. Then re-resolve against
+    // the *original* project (which still carries the `${...}` literals).
+    cache.invalidate();
+    if let Ok(listed) = cache.addons(&clever, &project.org) {
+        for (name, la) in listed.clone() {
+            live.addon_lookup_by_name.insert(
+                name,
+                crate::commands::live::AddonLookup {
+                    addon_id: la.addon_id,
+                    real_id: la.real_id,
+                    provider_id: la.provider_id,
+                },
+            );
         }
     }
     crate::commands::cross_refs::resolve_in_project(&clever, &org_for_refs, &mut project, &live)
@@ -428,6 +437,7 @@ fn render_display(display: &IndexMap<String, String>) -> String {
     for (k, v) in display {
         let _ = writeln!(out, "  {k:<width$}  {v}");
     }
+    out.push_str("\n");
     out
 }
 
