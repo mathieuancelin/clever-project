@@ -811,7 +811,7 @@ mod tests {
             live_addon_names: Default::default(),
             live_ng_names: Default::default(),
             app_id_by_name: Default::default(),
-            addon_id_by_name: Default::default(),
+            addon_lookup_by_name: Default::default(),
         };
 
         // Hand-built state that tracks the orphan app.
