@@ -507,6 +507,7 @@ pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
     let mut to_create = 0;
     let mut to_update = 0;
     let mut unchanged = 0;
+    out.push_str("\n");
     for o in &plan.apps {
         match &o.kind {
             AppOpKind::Create { .. } => to_create += 1,
@@ -564,6 +565,7 @@ pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
         let _ = writeln!(out);
     }
 
+    out.push_str("\n");
     out
 }
 
@@ -816,7 +818,7 @@ mod tests {
             live_addon_names: Default::default(),
             live_ng_names: Default::default(),
             app_id_by_name: Default::default(),
-            addon_id_by_name: Default::default(),
+            addon_lookup_by_name: Default::default(),
         }
     }
 
