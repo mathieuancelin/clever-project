@@ -437,7 +437,7 @@ fn render_display(display: &IndexMap<String, String>) -> String {
     for (k, v) in display {
         let _ = writeln!(out, "  {k:<width$}  {v}");
     }
-    out.push_str("\n");
+    out.push('\n');
     out
 }
 
