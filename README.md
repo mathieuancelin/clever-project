@@ -11,6 +11,8 @@ clever-project check project.yaml --offline
 clever-project status project.yaml
 ```
 
+Looking for a working example to copy-paste? The [`recipes/`](recipes/) folder ships ready-to-apply project files for common stacks (n8n, more to come) — grab one, tweak the names and `org`, and run `clever-project apply`.
+
 ## Prerequisites
 
 - The official `clever-tools` CLI must be installed and on your `PATH`:
