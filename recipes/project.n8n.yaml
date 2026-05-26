@@ -1,0 +1,58 @@
+name: n8n-template
+region: par
+display:
+  n8n-url: https://n8n-clevercloud-template-${slug}.cleverapps.io/
+variables:
+  common:
+    slug: ${ulid_lowercase()}
+    encryption_key: ${random_alphanumeric(32)}
+apps:
+  n8n:
+    name: n8n
+    kind: node
+    source:
+      from: https://github.com/CleverCloud/n8n-example.git
+      branch: master
+    domains:
+    - n8n-clevercloud-template-${slug}.cleverapps.io
+    scalability:
+      auto: false
+      instances:
+        minNumber: 1
+        minSize: S
+    build:
+      separate: false
+      flavor: S
+    dependencies:
+    - n8n-pg
+    - n8n-fs
+    env: 
+      CC_FS_BUCKET: /data:${addons.n8n-fs.env.BUCKET_HOST}
+      DATA_FOLDER: /app/data/
+      DB_POSTGRESDB_DATABASE: ${addons.n8n-pg.env.POSTGRESQL_ADDON_DB}
+      DB_POSTGRESDB_HOST: ${addons.n8n-pg.env.POSTGRESQL_ADDON_HOST}
+      DB_POSTGRESDB_PASSWORD: ${addons.n8n-pg.env.POSTGRESQL_ADDON_PASSWORD}
+      DB_POSTGRESDB_PORT: ${addons.n8n-pg.env.POSTGRESQL_ADDON_PORT}
+      DB_POSTGRESDB_USER: ${addons.n8n-pg.env.POSTGRESQL_ADDON_USER}
+      DB_TYPE: postgresdb
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: 'true'
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      N8N_ENCRYPTION_KEY: ${encryption_key}
+      N8N_HOST: n8n-clevercloud-template-${slug}.cleverapps.io
+      N8N_PORT: '8080'
+      N8N_PROTOCOL: https
+      N8N_RUNNERS_ENABLED: 'true'
+      VUE_APP_URL_BASE_APP: https://n8n-clevercloud-template-${slug}.cleverapps.io/
+      WEBHOOK_URL: https://n8n-clevercloud-template-${slug}.cleverapps.io/
+addons:
+  n8n-fs:
+    name: n8n-fs
+    kind: fs-bucket
+    size: s
+    crypted: false
+  n8n-pg:
+    name: n8n-pg
+    kind: postgresql
+    size: xs_sml
+    crypted: false
