@@ -2,6 +2,8 @@
 
 Declare your [Clever Cloud](https://www.clever.cloud/) resources in a YAML, JSON or TOML file and sync them with a single command. `clever-project` reads the project file and drives the official `clever-tools` CLI to create, update or delete the corresponding apps and addons.
 
+It's built to make spinning up reproducible, parameterised or disposable environments effortless — stand up an identical preview stack per branch, hand a teammate a one-shot sandbox, or tear the whole thing down when you're done, all from the same declarative file.
+
 ```sh
 clever-project init
 clever-project apply project.yaml --env prod
@@ -11,7 +13,44 @@ clever-project check project.yaml --offline
 clever-project status project.yaml
 ```
 
-Looking for a working example to copy-paste? The [`recipes/`](recipes/) folder ships ready-to-apply project files for common stacks (n8n, more to come) — grab one, tweak the names and `org`, and run `clever-project apply`.
+Here's what a project file looks like — one app, one database, wired together, with a generated slug for a unique domain:
+
+```yaml
+name: my-api
+org: orga_xxxxxx-xxxx-xxxxx
+region: par
+variables:
+  slug: ${ulid_lowercase()}
+  api_key: ${random_alphanumeric(32)}
+display:
+  url: https://api-${slug}.cleverapps.io/
+apps:
+  api:
+    name: api-${slug}
+    kind: node
+    source:
+      from: https://github.com/me/my-api.git
+      branch: main
+    domains:
+      - api-${slug}.cleverapps.io
+    scalability:
+      auto: false
+      instances: { minNumber: 1, minSize: S }
+    dependencies:
+      - db
+    env:
+      API_KEY: ${api_key}
+      DB_HOST: ${addons.db.env.POSTGRESQL_ADDON_HOST}
+      DB_URI:  ${addons.db.env.POSTGRESQL_ADDON_URI}
+      PUBLIC_URL: https://api-${slug}.cleverapps.io/
+addons:
+  db:
+    name: db-${slug}
+    kind: postgresql
+    size: xs_sml
+```
+
+Highlights: `${ulid_lowercase()}` / `${random_alphanumeric(32)}` are built-in generators evaluated once per run, so every reference to `${slug}` gets the same value. `${addons.db.env.POSTGRESQL_ADDON_HOST}` is a cross-resource ref — `clever-project` creates the addon first, then injects the live value into the app's env. The `display` block is printed at the end of `apply` so you immediately see the URL to open. Looking for more? The [`recipes/`](recipes/) folder ships ready-to-apply project files for common stacks (n8n, more to come) — grab one, tweak the names and `org`, and run `clever-project apply`.
 
 ## Prerequisites
 
