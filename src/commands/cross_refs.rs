@@ -536,6 +536,8 @@ mod tests {
                 region: None,
                 version: None,
                 backup_path: None,
+                env: IndexMap::new(),
+                domains: vec![],
             },
         );
         let json = serde_json::json!({
@@ -572,6 +574,8 @@ mod tests {
                 region: None,
                 version: None,
                 backup_path: None,
+                env: IndexMap::new(),
+                domains: vec![],
             },
         );
         let json = serde_json::json!({ "api": { "url": "x" } });
@@ -604,6 +608,8 @@ mod tests {
                 region: None,
                 version: None,
                 backup_path: None,
+                env: IndexMap::new(),
+                domains: vec![],
             },
         );
         let json = serde_json::json!({ "api": { "url": "x" } });
