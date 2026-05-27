@@ -224,6 +224,15 @@ impl Clever {
         self.run_json(&["curl", &url])
     }
 
+    /// Resolve the underlying Clever app id powering a managed addon
+    /// (otoroshi, keycloak, ...). Returns `None` when the provider has no
+    /// entrypoint (database-style addons) or when the field isn't populated
+    /// yet (addon still provisioning).
+    pub fn get_addon_entrypoint(&self, provider_id: &str, real_id: &str) -> Result<Option<String>> {
+        let meta = self.get_addon_meta(provider_id, real_id)?;
+        Ok(extract_entrypoint(&meta))
+    }
+
     pub fn get_domains(&self, app: &str) -> Result<Vec<Domain>> {
         let json = self.run_json(&["domain", "--app", app, "--format", "json"])?;
         serde_json::from_value(json).context("decoding `domain` output")
@@ -681,6 +690,14 @@ fn normalize_v4_provider_id(provider_id: &str) -> String {
     }
 }
 
+fn extract_entrypoint(meta: &serde_json::Value) -> Option<String> {
+    meta.get("resources")
+        .and_then(|r| r.get("entrypoint"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn is_transient_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     const PATTERNS: &[&str] = &[
@@ -1103,6 +1120,26 @@ mod tests {
         assert!(d1.as_millis() >= 100 && d1.as_millis() < 300);
         assert!(d2.as_millis() >= 200 && d2.as_millis() < 400);
         assert!(d3.as_millis() >= 400 && d3.as_millis() < 600);
+    }
+
+    #[test]
+    fn extract_entrypoint_pulls_resources_entrypoint() {
+        let v = serde_json::json!({
+            "resources": {"entrypoint": "app_xxx", "redisId": "redis_yyy"}
+        });
+        assert_eq!(extract_entrypoint(&v).as_deref(), Some("app_xxx"));
+    }
+
+    #[test]
+    fn extract_entrypoint_returns_none_when_missing_or_empty() {
+        let null = serde_json::json!({"resources": {"entrypoint": null}});
+        assert!(extract_entrypoint(&null).is_none());
+        let empty = serde_json::json!({"resources": {"entrypoint": ""}});
+        assert!(extract_entrypoint(&empty).is_none());
+        let no_field = serde_json::json!({"resources": {}});
+        assert!(extract_entrypoint(&no_field).is_none());
+        let no_resources = serde_json::json!({});
+        assert!(extract_entrypoint(&no_resources).is_none());
     }
 
     #[test]
