@@ -161,13 +161,27 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
     }
 
     // Detailed addons — only those in the project file. The listing is
-    // already detailed enough to fill in `kind` / `size` / `region`, no
-    // extra per-addon call.
+    // already detailed enough to fill in `kind` / `size` / `region`. For
+    // managed addons whose project entry declares `env:` or `domains:`,
+    // we also chase down the entrypoint app and pull its env + vhosts so
+    // status/plan can diff them. Addons that the project file mentions
+    // but doesn't customise stay cheap (no extra API call).
+    let addons_with_managed_features: HashSet<&str> = project
+        .addons
+        .values()
+        .filter(|a| !a.env.is_empty() || !a.domains.is_empty())
+        .map(|a| a.name.as_str())
+        .collect();
     let mut addons: IndexMap<String, Addon> = IndexMap::new();
     for listed in &all_addons {
         if !project_addon_names.contains(listed.name.as_str()) {
             continue;
         }
+        let (env, domains) = if addons_with_managed_features.contains(listed.name.as_str()) {
+            fetch_addon_entrypoint_details(clever, org, listed).unwrap_or_default()
+        } else {
+            (IndexMap::new(), Vec::new())
+        };
         addons.insert(
             listed.name.clone(),
             Addon {
@@ -178,6 +192,8 @@ pub fn snapshot(clever: &Clever, org: &str, project: &Project) -> Result<LiveSna
                 region: (listed.region != default_region).then(|| listed.region.clone()),
                 version: None,
                 backup_path: None,
+                env,
+                domains,
             },
         );
     }
@@ -265,4 +281,46 @@ fn pick_default_region(
 
 fn strip_addon_suffix(provider_id: &str) -> &str {
     provider_id.strip_suffix("-addon").unwrap_or(provider_id)
+}
+
+/// For a managed addon, resolve its underlying entrypoint app and return
+/// (env vars, custom domains). Returns `None` when the addon has no
+/// entrypoint (database-style provider, or still provisioning) or when
+/// any of the API calls fail — the caller treats that as "no drift data
+/// available" rather than bailing the whole snapshot. Cleverapps.io
+/// auto-vhosts are filtered out so they don't surface as drift.
+fn fetch_addon_entrypoint_details(
+    clever: &Clever,
+    org: &str,
+    listed: &crate::clever::ListedAddon,
+) -> Option<(IndexMap<String, String>, Vec<String>)> {
+    let entrypoint = match clever.get_addon_entrypoint(&listed.provider_id, &listed.real_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return None,
+        Err(e) => {
+            warn!(
+                "failed to fetch entrypoint metadata for addon `{}` ({}): {e:#}",
+                listed.name, listed.real_id
+            );
+            return None;
+        }
+    };
+    let details = match clever.get_app_details(org, &entrypoint) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                "failed to fetch entrypoint app details for addon `{}` (entrypoint {entrypoint}): {e:#}",
+                listed.name
+            );
+            return None;
+        }
+    };
+    let env: IndexMap<String, String> =
+        details.env.into_iter().map(|v| (v.name, v.value)).collect();
+    let domains: Vec<String> = details
+        .vhosts
+        .into_iter()
+        .filter(|h| !h.ends_with(".cleverapps.io") && !h.ends_with(".clever-cloud.com"))
+        .collect();
+    Some((env, domains))
 }
