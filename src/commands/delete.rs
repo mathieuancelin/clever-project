@@ -544,6 +544,8 @@ mod tests {
             region: None,
             version: None,
             backup_path: None,
+            env: IndexMap::new(),
+            domains: vec![],
         }
     }
 
