@@ -232,6 +232,26 @@ pub fn run(args: ApplyArgs) -> Result<()> {
     crate::commands::cross_refs::resolve_in_project(&clever, &org_for_refs, &mut project, &live)
         .with_context(|| "resolving cross-resource env references after phase 1".to_string())?;
 
+    // Phase 1.5 — managed addon entrypoints. For every targeted addon
+    // that declares `env:` or `domains:`, resolve its underlying
+    // entrypoint app id via the v4 metadata endpoint and push env +
+    // domains onto it (same calls as a real app). Skipped silently for
+    // addons without those fields. The resulting `env_changed` is
+    // collected so phase 5 can restart the entrypoint when needed.
+    let mut addon_entrypoint_outcomes: HashMap<String, AddonEntrypointOutcome> = HashMap::new();
+    for (key, addon) in &project.addons {
+        if !targets.is_targeted(TargetKind::Addon, key) {
+            continue;
+        }
+        if addon.env.is_empty() && addon.domains.is_empty() {
+            continue;
+        }
+        let addon_id = addon_id_by_key.get(key).map(String::as_str);
+        let outcome = sync_addon_entrypoint(&clever, &live, addon_id, key, addon)
+            .with_context(|| format!("syncing entrypoint of addon `{}`", addon.name))?;
+        addon_entrypoint_outcomes.insert(key.clone(), outcome);
+    }
+
     // Phase 2 — apps. Same targeted/lookup-only split as phase 1, but only
     // targeted apps get queued for phase 3/5 work.
     let mut app_id_by_key: HashMap<String, String> = HashMap::new();
@@ -413,6 +433,26 @@ pub fn run(args: ApplyArgs) -> Result<()> {
                 .restart(&outcome.id)
                 .with_context(|| format!("restarting app `{}`", _app.name))?;
         }
+    }
+
+    // Restart managed addon entrypoints whose env changed in phase 1.5.
+    // Domain-only changes don't trigger a restart (matches app behaviour).
+    for (key, outcome) in &addon_entrypoint_outcomes {
+        if !outcome.env_changed {
+            continue;
+        }
+        let Some(entrypoint) = &outcome.entrypoint_id else {
+            continue;
+        };
+        let addon_name = project
+            .addons
+            .get(key)
+            .map(|a| a.name.as_str())
+            .unwrap_or(key);
+        info!("restarting entrypoint of addon `{addon_name}` ({entrypoint}) — env changed");
+        clever
+            .restart(entrypoint)
+            .with_context(|| format!("restarting entrypoint of addon `{addon_name}`"))?;
     }
 
     persist_state(&clever, &state)?;
@@ -655,6 +695,16 @@ fn handle_addon(
         });
     }
     Ok(created.addon_id)
+}
+
+/// Outcome of pushing a managed addon's `env` / `domains` onto its
+/// underlying entrypoint app. `entrypoint_id` is None when we couldn't
+/// resolve it (synthetic dry-run addon, or non-fatal lookup miss); in
+/// that case `env_changed` is forward-looking ("would change if applied
+/// against real state").
+struct AddonEntrypointOutcome {
+    entrypoint_id: Option<String>,
+    env_changed: bool,
 }
 
 /// Outcome of bringing one app into the desired state.
@@ -1034,6 +1084,146 @@ fn maps_equal(
 
 fn is_synthetic(id: &str) -> bool {
     id.starts_with("dry-run::")
+}
+
+/// Push `env` and `domains` onto a managed addon's entrypoint app.
+///
+/// Lookup chain: `live.addon_lookup_by_name` carries `provider_id` +
+/// `real_id` for every addon in the org (populated by the cross-refs
+/// second pass right before this phase runs). Then `get_addon_entrypoint`
+/// fetches the v4 metadata, retried briefly to give a freshly-created
+/// addon time to populate its `resources.entrypoint` field.
+///
+/// In dry-run with a synthetic addon id (i.e. the addon would be created
+/// in this run), we can't reach the entrypoint at all — we log the
+/// intent and report `env_changed = !env.is_empty()` so the apply summary
+/// reflects what would happen.
+fn sync_addon_entrypoint(
+    clever: &Clever,
+    live: &crate::commands::live::LiveSnapshot,
+    addon_id: Option<&str>,
+    key: &str,
+    addon: &crate::model::Addon,
+) -> Result<AddonEntrypointOutcome> {
+    // Dry-run + just-going-to-create: nothing to talk to yet.
+    if clever.is_dry_run() && addon_id.is_some_and(is_synthetic) {
+        info!(
+            "[dry-run] would push env/domains on entrypoint of addon `{}` once it's created [project key: {key}]",
+            addon.name
+        );
+        return Ok(AddonEntrypointOutcome {
+            entrypoint_id: None,
+            env_changed: !addon.env.is_empty(),
+        });
+    }
+
+    let lookup = live.addon_lookup_by_name.get(&addon.name).ok_or_else(|| {
+        anyhow!(
+            "addon `{}` not found in live snapshot — cannot resolve entrypoint to push env/domains [project key: {key}]",
+            addon.name
+        )
+    })?;
+
+    let entrypoint = match resolve_entrypoint_with_retry(
+        clever,
+        &lookup.provider_id,
+        &lookup.real_id,
+        &addon.name,
+    )? {
+        Some(id) => id,
+        None => {
+            bail!(
+                "addon `{}` (kind `{}`) has no `resources.entrypoint` — only managed addons (otoroshi, keycloak, ...) accept env/domains. If the addon was just created, give it a moment to finish provisioning and rerun apply.",
+                addon.name,
+                addon.kind
+            );
+        }
+    };
+
+    // env: ADDITIVE. Clever sets a bunch of internal vars on managed
+    // addon entrypoints (CC_OTOROSHI_API_CLIENT_ID, etc.) — we must not
+    // wipe them. Pull the current set, overlay only the keys from the
+    // project file, push back the merged map if anything actually
+    // changed. Keys removed from the project file are NOT deleted from
+    // the entrypoint; the user must clean them up by hand.
+    let env_changed = if !addon.env.is_empty() {
+        let current: IndexMap<String, String> = clever
+            .get_env(&entrypoint)?
+            .into_iter()
+            .map(|v| (v.name, v.value))
+            .collect();
+        let mut merged = current.clone();
+        for (k, v) in &addon.env {
+            merged.insert(k.clone(), v.clone());
+        }
+        if !maps_equal(&current, &merged) {
+            info!(
+                "merging {} env var(s) into entrypoint `{entrypoint}` of addon `{}` [project key: {key}]",
+                addon.env.len(),
+                addon.name
+            );
+            clever.env_replace(&entrypoint, &merged)?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // domains: ADD-ONLY. Clever attaches its own *.cleverapps.io /
+    // *.clever-cloud.com vhosts and the addon may already serve user
+    // domains the project file doesn't track. Never remove.
+    if !addon.domains.is_empty() {
+        let current: HashSet<String> = clever
+            .get_domains(&entrypoint)?
+            .into_iter()
+            .map(|d| d.hostname)
+            .collect();
+        for d in &addon.domains {
+            if !current.contains(d) {
+                clever.domain_add(&entrypoint, d)?;
+            }
+        }
+    }
+
+    Ok(AddonEntrypointOutcome {
+        entrypoint_id: Some(entrypoint),
+        env_changed,
+    })
+}
+
+/// Best-effort resolution of an addon's entrypoint app id. Retries a few
+/// times because freshly-created managed addons take a few seconds to
+/// populate the `resources.entrypoint` field. Errors from the underlying
+/// call bubble up; `Ok(None)` means the addon doesn't have an entrypoint
+/// (database-style providers, or still null after the retries).
+fn resolve_entrypoint_with_retry(
+    clever: &Clever,
+    provider_id: &str,
+    real_id: &str,
+    addon_name: &str,
+) -> Result<Option<String>> {
+    const ATTEMPTS: u32 = 5;
+    const BASE_DELAY_MS: u64 = 1500;
+    let mut last: Option<String> = None;
+    for attempt in 1..=ATTEMPTS {
+        match clever.get_addon_entrypoint(provider_id, real_id)? {
+            Some(id) => return Ok(Some(id)),
+            None => {
+                last = None;
+                if attempt < ATTEMPTS {
+                    let delay = std::time::Duration::from_millis(BASE_DELAY_MS * attempt as u64);
+                    warn!(
+                        "addon `{addon_name}` entrypoint not populated yet (attempt {attempt}/{ATTEMPTS}); waiting {:?}",
+                        delay
+                    );
+                    std::thread::sleep(delay);
+                }
+            }
+        }
+    }
+    Ok(last)
 }
 
 /// Sync the linked services for one app. Returns whether at least one link
@@ -1519,6 +1709,8 @@ mod tests {
                     region: region.map(str::to_string),
                     version: None,
                     backup_path: None,
+                    env: IndexMap::new(),
+                    domains: vec![],
                 },
             );
         }
