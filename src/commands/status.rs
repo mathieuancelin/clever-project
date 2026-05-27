@@ -9,7 +9,8 @@ use tracing::info;
 use crate::clever::Clever;
 use crate::cli::StatusArgs;
 use crate::commands::diff::{
-    DiffBody, FieldDiff, diff_map, diff_set, kinds_equivalent, quote_escape, sizes_equivalent,
+    DiffBody, FieldDiff, diff_map, diff_map_additive, diff_set, diff_set_additive,
+    kinds_equivalent, quote_escape, sizes_equivalent,
 };
 use crate::commands::live::{LiveSnapshot, snapshot as live_snapshot};
 use crate::commands::resolve_project_file;
@@ -421,6 +422,20 @@ fn diff_addon(
             },
         });
     }
+    // env/domains on the addon entrypoint — additive only. Apply
+    // merges env (keeping Clever's internal vars) and only adds new
+    // domains (never removes), so the diff mirrors that: extra keys /
+    // domains on the live side aren't drift.
+    if !file.env.is_empty()
+        && let Some(d) = diff_map_additive("env", &file.env, &live.env)
+    {
+        diffs.push(d);
+    }
+    if !file.domains.is_empty()
+        && let Some(d) = diff_set_additive("domains", &file.domains, &live.domains)
+    {
+        diffs.push(d);
+    }
     diffs
 }
 
@@ -604,6 +619,8 @@ mod tests {
             region: None,
             version: None,
             backup_path: None,
+            env: IndexMap::new(),
+            domains: vec![],
         }
     }
 
@@ -724,6 +741,63 @@ mod tests {
         let diffs = diff_addon(&a, &b, "par", "par");
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].field, "size");
+    }
+
+    #[test]
+    fn diff_addon_env_drift_surfaces_when_file_declares_env() {
+        let mut a = make_addon("oto", "otoroshi", None);
+        let mut b = make_addon("oto", "otoroshi", None);
+        a.env.insert("FOO".into(), "new".into());
+        b.env.insert("FOO".into(), "old".into());
+        let diffs = diff_addon(&a, &b, "par", "par");
+        assert!(diffs.iter().any(|d| d.field == "env"));
+    }
+
+    #[test]
+    fn diff_addon_env_drift_silent_when_file_omits_env() {
+        let a = make_addon("oto", "otoroshi", None);
+        let mut b = make_addon("oto", "otoroshi", None);
+        b.env.insert("LIVE_ONLY".into(), "x".into());
+        // file declares no env block → no drift reported even though live
+        // has values. Matches apply (it won't touch what wasn't declared).
+        assert!(diff_addon(&a, &b, "par", "par").is_empty());
+    }
+
+    #[test]
+    fn diff_addon_env_ignores_live_only_keys() {
+        // file declares FOO; live has FOO (same value) AND a bunch of
+        // Clever-set internal vars. None of those should surface as
+        // drift since apply merges instead of replacing.
+        let mut a = make_addon("oto", "otoroshi", None);
+        let mut b = make_addon("oto", "otoroshi", None);
+        a.env.insert("FOO".into(), "v".into());
+        b.env.insert("FOO".into(), "v".into());
+        b.env.insert("CC_INTERNAL".into(), "leave-me".into());
+        b.env.insert("CC_OTHER".into(), "stay".into());
+        assert!(diff_addon(&a, &b, "par", "par").is_empty());
+    }
+
+    #[test]
+    fn diff_addon_domains_ignores_live_only_entries() {
+        // file declares one custom domain; live has it plus Clever's
+        // own provisioned vhosts. Add-only diff → no drift.
+        let mut a = make_addon("oto", "otoroshi", None);
+        let mut b = make_addon("oto", "otoroshi", None);
+        a.domains.push("oto.example.com".into());
+        b.domains.push("oto.example.com".into());
+        b.domains
+            .push("oto-backoffice.cc-ai.clever-cloud.com".into());
+        assert!(diff_addon(&a, &b, "par", "par").is_empty());
+    }
+
+    #[test]
+    fn diff_addon_domains_drift_surfaces_when_file_declares_domains() {
+        let mut a = make_addon("oto", "otoroshi", None);
+        let mut b = make_addon("oto", "otoroshi", None);
+        a.domains.push("oto.example.com".into());
+        b.domains.push("old.example.com".into());
+        let diffs = diff_addon(&a, &b, "par", "par");
+        assert!(diffs.iter().any(|d| d.field == "domains"));
     }
 
     #[test]
