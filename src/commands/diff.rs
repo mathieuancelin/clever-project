@@ -101,6 +101,67 @@ pub fn diff_map(
     })
 }
 
+/// Like `diff_set` but only flags entries present in `file` and missing
+/// from `live`. Entries unique to `live` are ignored. Use for fields the
+/// project file *adds to* rather than *replaces* (managed addon
+/// entrypoint domains: Clever sets internal ones we don't want to
+/// surface as drift).
+pub fn diff_set_additive(field: &str, file: &[String], live: &[String]) -> Option<FieldDiff> {
+    let live_set: BTreeSet<&str> = live.iter().map(String::as_str).collect();
+    let mut entries: Vec<SetEntry> = Vec::new();
+    for v in file {
+        if !live_set.contains(v.as_str()) {
+            entries.push(SetEntry {
+                op: '+',
+                value: v.clone(),
+            });
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(FieldDiff {
+        field: field.into(),
+        body: DiffBody::Set { entries },
+    })
+}
+
+/// Like `diff_map` but only flags keys present in `file` and either
+/// missing or with a different value on `live`. Keys unique to `live`
+/// are ignored. Use for managed addon entrypoint env: Clever populates
+/// dozens of internal vars we never want to flag as drift.
+pub fn diff_map_additive(
+    field: &str,
+    file: &IndexMap<String, String>,
+    live: &IndexMap<String, String>,
+) -> Option<FieldDiff> {
+    let mut entries: Vec<MapEntry> = Vec::new();
+    for (k, fv) in file {
+        match live.get(k) {
+            Some(lv) if lv == fv => {}
+            Some(lv) => entries.push(MapEntry {
+                op: '~',
+                key: k.clone(),
+                file: Some(fv.clone()),
+                live: Some(lv.clone()),
+            }),
+            None => entries.push(MapEntry {
+                op: '+',
+                key: k.clone(),
+                file: Some(fv.clone()),
+                live: None,
+            }),
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(FieldDiff {
+        field: field.into(),
+        body: DiffBody::Map { entries },
+    })
+}
+
 /// Loose equivalence between an addon `kind` written in the project file and
 /// the live provider id (stripped of the `-addon` suffix on the live side).
 /// Mirrors the aliases recognised at apply time so the short and long forms
@@ -186,6 +247,65 @@ mod tests {
         assert_eq!(entries.len(), 3);
         let ops: BTreeSet<char> = entries.iter().map(|e| e.op).collect();
         assert!(ops.contains(&'+') && ops.contains(&'-') && ops.contains(&'~'));
+    }
+
+    #[test]
+    fn diff_set_additive_only_flags_missing_from_live() {
+        // file has "a" and "b"; live has "b" and an extra "c". Only "a"
+        // should surface — "c" is ignored.
+        let d = diff_set_additive(
+            "domains",
+            &["a".into(), "b".into()],
+            &["b".into(), "c".into()],
+        )
+        .unwrap();
+        let DiffBody::Set { entries } = &d.body else {
+            panic!()
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].op, '+');
+        assert_eq!(entries[0].value, "a");
+    }
+
+    #[test]
+    fn diff_set_additive_returns_none_when_file_subset_of_live() {
+        let d = diff_set_additive(
+            "domains",
+            &["b".into()],
+            &["a".into(), "b".into(), "c".into()],
+        );
+        assert!(d.is_none());
+    }
+
+    #[test]
+    fn diff_map_additive_ignores_live_only_keys() {
+        let mut f = IndexMap::new();
+        f.insert("FOO".into(), "new".into());
+        f.insert("BAR".into(), "same".into());
+        let mut l = IndexMap::new();
+        l.insert("FOO".into(), "old".into()); // changed
+        l.insert("BAR".into(), "same".into()); // unchanged
+        l.insert("CC_INTERNAL".into(), "leave-me-alone".into()); // live-only — ignored
+        let d = diff_map_additive("env", &f, &l).unwrap();
+        let DiffBody::Map { entries } = &d.body else {
+            panic!()
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "FOO");
+        assert_eq!(entries[0].op, '~');
+    }
+
+    #[test]
+    fn diff_map_additive_flags_missing_keys_as_add() {
+        let mut f = IndexMap::new();
+        f.insert("NEW".into(), "yes".into());
+        let l = IndexMap::new();
+        let d = diff_map_additive("env", &f, &l).unwrap();
+        let DiffBody::Map { entries } = &d.body else {
+            panic!()
+        };
+        assert_eq!(entries[0].op, '+');
+        assert_eq!(entries[0].key, "NEW");
     }
 
     #[test]
