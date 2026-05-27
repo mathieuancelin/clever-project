@@ -582,6 +582,12 @@ addons:
     crypted: true                      # encryption-at-rest (best-effort, may not apply to every provider)
     region: par
     version: "16"
+    # `env:` and `domains:` only apply to managed addons (otoroshi,
+    # keycloak, matomo, metabase, pulsar). They're pushed onto the
+    # underlying entrypoint app — see the "Managed addons" section below.
+    env:
+      KEY: value
+    domains: [oto.example.com]
 network_groups:
   <key>:
     name: <clever ng label>            # the Network Group label on Clever
@@ -598,6 +604,33 @@ network_groups:
 - Addon `kind:` accepts the short form (`postgresql`, `redis`, `cellar`, `matomo`, ...) and is mapped to the right Clever provider id (`postgresql-addon`, `redis-addon`, `cellar-addon`, `addon-matomo`, ...). Unknown values pass through unchanged.
 - Addon `kind`, `size`, and `region` are validated at the start of every `apply` against the live provider catalog returned by Clever's API (`clever curl /v2/products/addonproviders?orgaId=...`). Typos and unsupported combinations fail fast, before any mutation. Plan slug casing is normalized to the canonical value from the API (so `size: S_BIG` works even though Clever expects `s_big` for PostgreSQL). Skipped automatically when the project has no addons.
 - App `scalability.instances.minSize` / `maxSize` are validated at the start of every `apply` against the live instance catalog (`clever curl /v2/products/instances?for=...`). Unknown flavors are rejected with the list of valid sizes for that kind, and casing is normalized to Clever's canonical form (`s` → `S`, etc.). Skipped if no app declares a flavor.
+
+## Managed addons (env and domains)
+
+Some Clever addons are *managed services* that run on a real Clever app under the hood — `otoroshi`, `keycloak`, `matomo`, `metabase`, `pulsar`. Their v4 metadata exposes a `resources.entrypoint` field holding the underlying `app_xxx` id; `clever-project` resolves it and treats `addon.env` / `addon.domains` as a thin pass-through onto that entrypoint app:
+
+```yaml
+addons:
+  oto:
+    name: ${env}-otoroshi
+    kind: otoroshi
+    env:
+      OTOROSHI_INITIAL_ADMIN_LOGIN: admin@example.com
+      OTOROSHI_DOMAIN: oto.example.com
+    domains:
+      - oto.example.com
+      - api.oto.example.com
+```
+
+Rules:
+- `env:` and `domains:` are **only allowed on managed addon kinds**. Declaring them on `postgresql`, `redis`, `cellar`, etc. fails at load time (the field would silently no-op since those addons have no entrypoint). The full list of supported kinds is `otoroshi`, `keycloak`, `matomo`, `metabase`, `pulsar` (with or without the `addon-` prefix).
+- Apply semantics are **additive**, never replacing — the entrypoint app already carries internal vars Clever sets at provisioning (`CC_OTOROSHI_API_CLIENT_ID`, etc.) and its own `*.clever-cloud.com` / `*.cleverapps.io` vhosts. We don't want to wipe those.
+  - **env** is *merged*: apply pulls the current entrypoint env, overlays the keys from your project file, and pushes the merged map back. Keys you remove from the file are **not deleted** from the entrypoint; clean them up by hand if needed (`clever env rm KEY --app <entrypoint>`).
+  - **domains** is *add-only*: apply only adds entries from your file that aren't already attached. It never removes domains from the entrypoint. To take a domain down, do it on Clever's side (`clever domain rm`).
+- `status` and the apply plan mirror those semantics: extra env keys or domains on the live side are *not* flagged as drift — only entries declared in the file that are missing or have a different value count.
+- Restart behaviour mirrors apps: a managed addon's entrypoint is restarted when its env actually changed (i.e. the merged env differs from what was already there). Domain-only changes don't trigger a restart.
+- If the addon was just created in this run, apply polls the v4 metadata endpoint a few times (≈10 s total) to give Clever time to provision the underlying entrypoint. After ~5 attempts it bails with a hint to rerun apply once provisioning finishes.
+- `read` does **not** populate `env:` or `domains:` on addons; those fields are write-only from the project file's perspective. Use `status` to inspect what's live.
 
 ## Display block
 
