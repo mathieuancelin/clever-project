@@ -24,7 +24,8 @@ use indexmap::IndexMap;
 use serde::Serialize;
 
 use crate::commands::diff::{
-    DiffBody, FieldDiff, diff_map, diff_set, kinds_equivalent, quote_escape, sizes_equivalent,
+    DiffBody, FieldDiff, diff_map, diff_map_additive, diff_set, diff_set_additive,
+    kinds_equivalent, quote_escape, sizes_equivalent,
 };
 use crate::commands::live::LiveSnapshot;
 use crate::commands::targets::{TargetKind, Targets};
@@ -80,10 +81,18 @@ pub enum AddonOpKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<String>,
         region: String,
+        #[serde(skip_serializing_if = "IndexMap::is_empty")]
+        env: IndexMap<String, String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        domains: Vec<String>,
     },
-    /// Apply doesn't update existing addons; any drift on them is purely
-    /// informational.
-    Existing { drift: Vec<FieldDiff> },
+    /// `mutations`: env/domains apply will push onto the addon's
+    /// entrypoint (managed addons only).
+    /// `non_mutable_drift`: kind/size/region drift apply never rewrites.
+    Existing {
+        mutations: Vec<FieldDiff>,
+        non_mutable_drift: Vec<FieldDiff>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -114,7 +123,10 @@ impl Plan {
         let addon_changes = self
             .addons
             .iter()
-            .filter(|o| matches!(o.kind, AddonOpKind::Create { .. }))
+            .filter(|o| match &o.kind {
+                AddonOpKind::Create { .. } => true,
+                AddonOpKind::Existing { mutations, .. } => !mutations.is_empty(),
+            })
             .count();
         let ng_changes = self
             .network_groups
@@ -146,14 +158,20 @@ pub fn compute(project: &Project, live: &LiveSnapshot, targets: &Targets) -> Pla
                         .region
                         .clone()
                         .unwrap_or_else(|| project.region.clone()),
+                    env: addon.env.clone(),
+                    domains: addon.domains.clone(),
                 },
             }),
             Some(live_addon) => {
-                let drift =
+                let mutations = diff_addon_mutable(addon, live_addon);
+                let non_mutable_drift =
                     diff_addon_info(addon, live_addon, &project.region, &live.default_region);
                 plan.addons.push(AddonOp {
                     name: addon.name.clone(),
-                    kind: AddonOpKind::Existing { drift },
+                    kind: AddonOpKind::Existing {
+                        mutations,
+                        non_mutable_drift,
+                    },
                 });
             }
         }
@@ -379,6 +397,25 @@ fn diff_app_non_mutable(
     diffs
 }
 
+/// Fields apply *will* push onto an existing addon's entrypoint. Both
+/// are additive: env merges (Clever-set internal vars stay), domains add
+/// (Clever-managed vhosts stay). So the diff is additive too — only
+/// entries present in the file but missing/different on live count.
+fn diff_addon_mutable(file: &Addon, live: &Addon) -> Vec<FieldDiff> {
+    let mut diffs = Vec::new();
+    if !file.env.is_empty()
+        && let Some(d) = diff_map_additive("env", &file.env, &live.env)
+    {
+        diffs.push(d);
+    }
+    if !file.domains.is_empty()
+        && let Some(d) = diff_set_additive("domains", &file.domains, &live.domains)
+    {
+        diffs.push(d);
+    }
+    diffs
+}
+
 fn diff_addon_info(
     file: &Addon,
     live: &Addon,
@@ -463,6 +500,9 @@ pub fn to_json<'a>(plan: &'a Plan, project: &'a Project, targets: &Targets) -> P
     for o in &plan.addons {
         match &o.kind {
             AddonOpKind::Create { .. } => summary.to_create += 1,
+            AddonOpKind::Existing { mutations, .. } if !mutations.is_empty() => {
+                summary.to_update += 1
+            }
             AddonOpKind::Existing { .. } => summary.unchanged += 1,
         }
     }
@@ -518,6 +558,7 @@ pub fn render(plan: &Plan, project: &Project, targets: &Targets) -> String {
     for o in &plan.addons {
         match &o.kind {
             AddonOpKind::Create { .. } => to_create += 1,
+            AddonOpKind::Existing { mutations, .. } if !mutations.is_empty() => to_update += 1,
             AddonOpKind::Existing { .. } => unchanged += 1,
         }
     }
@@ -642,6 +683,8 @@ fn render_addon(out: &mut String, op: &AddonOp) {
             provider,
             size,
             region,
+            env,
+            domains,
         } => {
             let size_hint = match size {
                 Some(s) => format!(", {s}"),
@@ -652,17 +695,41 @@ fn render_addon(out: &mut String, op: &AddonOp) {
                 "  + addon \"{}\" ({provider}{size_hint}, region={region})",
                 op.name
             );
+            if !env.is_empty() {
+                let _ = writeln!(out, "      env (on entrypoint):");
+                for (k, v) in env {
+                    let _ = writeln!(out, "        + {k} = \"{}\"", quote_escape(v));
+                }
+            }
+            if !domains.is_empty() {
+                let _ = writeln!(out, "      domains (on entrypoint):");
+                for d in domains {
+                    let _ = writeln!(out, "        + {d}");
+                }
+            }
         }
-        AddonOpKind::Existing { drift } => {
-            if drift.is_empty() {
+        AddonOpKind::Existing {
+            mutations,
+            non_mutable_drift,
+        } => {
+            if mutations.is_empty() && non_mutable_drift.is_empty() {
                 let _ = writeln!(out, "  = addon \"{}\"", op.name);
+                return;
+            }
+            if !mutations.is_empty() {
+                let _ = writeln!(out, "  ~ addon \"{}\"", op.name);
+                for d in mutations {
+                    render_field(out, d);
+                }
             } else {
                 let _ = writeln!(out, "  = addon \"{}\"", op.name);
+            }
+            if !non_mutable_drift.is_empty() {
                 let _ = writeln!(
                     out,
-                    "      ! drift detected (apply never updates existing addons):"
+                    "      ! drift on fields apply won't auto-update (recreate manually if needed):"
                 );
-                for d in drift {
+                for d in non_mutable_drift {
                     render_field_info(out, d);
                 }
             }
@@ -790,6 +857,8 @@ mod tests {
             region: None,
             version: None,
             backup_path: None,
+            env: IndexMap::new(),
+            domains: vec![],
         }
     }
 
@@ -1191,10 +1260,14 @@ mod tests {
                 provider,
                 size,
                 region,
+                env,
+                domains,
             } => {
                 assert_eq!(provider, "postgresql");
                 assert_eq!(size.as_deref(), Some("xs_sml"));
                 assert_eq!(region, "par");
+                assert!(env.is_empty());
+                assert!(domains.is_empty());
             }
             _ => panic!(),
         }
@@ -1214,12 +1287,85 @@ mod tests {
         );
         let plan = compute(&project, &live, &Targets::default());
         match &plan.addons[0].kind {
-            AddonOpKind::Existing { drift } => {
-                assert!(drift.iter().any(|d| d.field == "size"));
+            AddonOpKind::Existing {
+                mutations,
+                non_mutable_drift,
+            } => {
+                assert!(mutations.is_empty());
+                assert!(non_mutable_drift.iter().any(|d| d.field == "size"));
             }
             _ => panic!(),
         }
-        // Apply doesn't update addons, so this doesn't count as a mutation.
+        // Apply doesn't update kind/size/region, so this doesn't count as
+        // a mutation.
+        assert_eq!(plan.mutation_count(), 0);
+    }
+
+    #[test]
+    fn existing_managed_addon_env_drift_is_update() {
+        let mut project = empty_project();
+        let mut oto = make_addon("prod-oto", "otoroshi", None);
+        oto.env.insert("FOO".into(), "new".into());
+        project.addons.insert("oto".into(), oto);
+        let mut live = empty_live();
+        let mut live_oto = make_addon("prod-oto", "otoroshi", None);
+        live_oto.env.insert("FOO".into(), "old".into());
+        live.addons.insert("prod-oto".into(), live_oto);
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.addons[0].kind {
+            AddonOpKind::Existing { mutations, .. } => {
+                assert!(mutations.iter().any(|d| d.field == "env"));
+            }
+            _ => panic!("expected Existing"),
+        }
+        assert_eq!(plan.mutation_count(), 1);
+    }
+
+    #[test]
+    fn existing_managed_addon_domains_drift_is_update() {
+        let mut project = empty_project();
+        let mut oto = make_addon("prod-oto", "otoroshi", None);
+        oto.domains.push("oto.example.com".into());
+        project.addons.insert("oto".into(), oto);
+        let mut live = empty_live();
+        let live_oto = make_addon("prod-oto", "otoroshi", None);
+        live.addons.insert("prod-oto".into(), live_oto);
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.addons[0].kind {
+            AddonOpKind::Existing { mutations, .. } => {
+                assert!(mutations.iter().any(|d| d.field == "domains"));
+            }
+            _ => panic!("expected Existing"),
+        }
+        assert_eq!(plan.mutation_count(), 1);
+    }
+
+    #[test]
+    fn existing_managed_addon_env_extras_on_live_are_not_drift() {
+        // apply merges env, so Clever-set vars present on live but
+        // absent from the file should not count as drift / a mutation.
+        let mut project = empty_project();
+        let mut oto = make_addon("prod-oto", "otoroshi", None);
+        oto.env.insert("FOO".into(), "v".into());
+        project.addons.insert("oto".into(), oto);
+        let mut live = empty_live();
+        let mut live_oto = make_addon("prod-oto", "otoroshi", None);
+        live_oto.env.insert("FOO".into(), "v".into());
+        live_oto
+            .env
+            .insert("CC_OTOROSHI_API_CLIENT_ID".into(), "internal".into());
+        live.addons.insert("prod-oto".into(), live_oto);
+        let plan = compute(&project, &live, &Targets::default());
+        match &plan.addons[0].kind {
+            AddonOpKind::Existing {
+                mutations,
+                non_mutable_drift,
+            } => {
+                assert!(mutations.is_empty(), "got mutations: {mutations:?}");
+                assert!(non_mutable_drift.is_empty());
+            }
+            _ => panic!("expected Existing"),
+        }
         assert_eq!(plan.mutation_count(), 0);
     }
 
