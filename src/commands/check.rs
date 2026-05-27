@@ -77,6 +77,13 @@ pub fn run(args: CheckArgs) -> Result<()> {
             })?;
             validate_app_scaling(&mut project.apps, &instances, &mut issues);
         }
+        if project
+            .addons
+            .values()
+            .any(|a| !a.env.is_empty() || !a.domains.is_empty())
+        {
+            validate_managed_addon_entrypoints(&clever, &project, &mut issues)?;
+        }
     }
 
     if args.format.is_json() {
@@ -120,6 +127,47 @@ struct JsonReport<'a> {
     addons: usize,
     network_groups: usize,
     issues: Vec<String>,
+}
+
+/// For every project addon that declares `env:` or `domains:`, verify
+/// that the live addon (if it already exists on the org) actually has an
+/// entrypoint app id. Addons not yet on the org are skipped — apply will
+/// create them and re-validate at that point. Addons that exist but have
+/// no entrypoint surface a hard issue: env/domains would be unappliable.
+fn validate_managed_addon_entrypoints(
+    clever: &Clever,
+    project: &Project,
+    issues: &mut Vec<Issue>,
+) -> Result<()> {
+    let listed = clever.list_addons(&project.org).with_context(|| {
+        format!(
+            "listing addons in org `{}` for entrypoint validation",
+            project.org
+        )
+    })?;
+    let by_name: HashMap<&str, &crate::clever::ListedAddon> =
+        listed.iter().map(|a| (a.name.as_str(), a)).collect();
+    for (key, addon) in &project.addons {
+        if addon.env.is_empty() && addon.domains.is_empty() {
+            continue;
+        }
+        let Some(live) = by_name.get(addon.name.as_str()) else {
+            // Addon doesn't exist yet — apply will create it.
+            continue;
+        };
+        match clever.get_addon_entrypoint(&live.provider_id, &live.real_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => issues.push_issue(format!(
+                "addon `{key}` ({}) has `env` or `domains` declared but its live entrypoint is unset — verify it's a managed addon and finished provisioning",
+                addon.name
+            )),
+            Err(e) => issues.push_issue(format!(
+                "addon `{key}` ({}) entrypoint validation failed: {e:#}",
+                addon.name
+            )),
+        }
+    }
+    Ok(())
 }
 
 /// Every `dependencies` entry of every app must reference an existing
@@ -243,6 +291,8 @@ mod tests {
             region: None,
             version: None,
             backup_path: None,
+            env: IndexMap::new(),
+            domains: vec![],
         }
     }
 
