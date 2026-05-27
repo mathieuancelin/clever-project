@@ -57,6 +57,25 @@ pub const ALLOWED_REGIONS: &[&str] = &[
     "par", "parhds", "scw", "grahds", "ldn", "mtl", "rbx", "rbxhds", "sgp", "syd", "wsw",
 ];
 
+/// Addon kinds that expose a `resources.entrypoint` app id in their v4
+/// metadata — i.e. managed services that run on a real Clever app under
+/// the hood. Only these accept `env:` and `domains:` on the project addon;
+/// database-style addons (postgresql, redis, ...) don't have an entrypoint
+/// and would silently no-op, so we reject them at load time instead.
+///
+/// Accepts both the bare canonical name (`otoroshi`) and the `addon-X`
+/// prefixed form Clever sometimes returns (`addon-otoroshi`).
+pub const MANAGED_ADDON_KINDS: &[&str] = &["otoroshi", "keycloak", "matomo", "metabase", "pulsar"];
+
+/// Whether the given addon `kind` (as written in the project file) is a
+/// managed service that supports `env:` and `domains:`. Tolerates the
+/// `addon-` prefix and case.
+pub fn is_managed_addon_kind(kind: &str) -> bool {
+    let lower = kind.to_lowercase();
+    let bare = lower.strip_prefix("addon-").unwrap_or(&lower);
+    MANAGED_ADDON_KINDS.contains(&bare)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -183,6 +202,15 @@ pub struct Addon {
     pub version: Option<serde_yaml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_path: Option<String>,
+    /// Env vars to push onto the underlying entrypoint app of a managed
+    /// addon (otoroshi, keycloak, ...). Rejected at load time when `kind`
+    /// is not a managed addon.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub env: IndexMap<String, String>,
+    /// Custom domains to attach to the underlying entrypoint app of a
+    /// managed addon. Rejected at load time when `kind` is not managed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -360,6 +388,7 @@ fn load_inner(
         .with_context(|| format!("deserializing project from `{}`", path.display()))?;
     validate_and_normalize_app_kinds(&mut project, &mut issues);
     validate_regions(&project, &mut issues);
+    validate_addon_managed_features(&project, &mut issues);
     Ok((project, resolver, issues))
 }
 
@@ -663,6 +692,33 @@ fn validate_regions(project: &Project, issues: &mut Vec<Issue>) {
     for (key, addon) in &project.addons {
         if let Some(r) = &addon.region {
             check_region(&format!("addon `{key}`"), r, issues);
+        }
+    }
+}
+
+/// Reject `env:` or `domains:` on an addon whose kind is not a known
+/// managed service. These fields are pushed onto the addon's entrypoint
+/// app — addons without an entrypoint (postgresql, redis, ...) would
+/// silently no-op, so we surface it at load time.
+fn validate_addon_managed_features(project: &Project, issues: &mut Vec<Issue>) {
+    for (key, addon) in &project.addons {
+        let has_env = !addon.env.is_empty();
+        let has_domains = !addon.domains.is_empty();
+        if !has_env && !has_domains {
+            continue;
+        }
+        if !is_managed_addon_kind(&addon.kind) {
+            let fields = match (has_env, has_domains) {
+                (true, true) => "`env` and `domains`",
+                (true, false) => "`env`",
+                (false, true) => "`domains`",
+                (false, false) => unreachable!(),
+            };
+            issues.push_issue(format!(
+                "addon `{key}` declares {fields} but kind `{}` is not a managed addon. Supported managed kinds: {}",
+                addon.kind,
+                MANAGED_ADDON_KINDS.join(", ")
+            ));
         }
     }
 }
@@ -1020,6 +1076,8 @@ size = "xs_sml"
                         region: None,
                         version: None,
                         backup_path: None,
+                        env: IndexMap::new(),
+                        domains: vec![],
                     },
                 );
                 m
@@ -1358,6 +1416,60 @@ apps:
         );
         let err = Project::load_and_resolve(&project_path, None, None, &[], None, &[]).unwrap_err();
         assert!(err.to_string().contains("secrets.nope") || err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn managed_addon_env_is_accepted() {
+        let yaml = "name: P\norg: o\nregion: par\naddons:\n  oto:\n    name: my-oto\n    kind: otoroshi\n    env:\n      FOO: bar\n    domains:\n      - oto.example.com\n";
+        let p = write_tmp("yaml", yaml);
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
+        let addon = project.addons.get("oto").unwrap();
+        assert_eq!(addon.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(addon.domains, vec!["oto.example.com".to_string()]);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn addon_prefixed_kind_is_managed() {
+        let yaml = "name: P\norg: o\nregion: par\naddons:\n  pul:\n    name: bus\n    kind: addon-pulsar\n    env:\n      X: y\n";
+        let p = write_tmp("yaml", yaml);
+        let (project, _r) = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
+        assert!(!project.addons.get("pul").unwrap().env.is_empty());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn addon_env_on_unmanaged_kind_rejected() {
+        let yaml = "name: P\norg: o\nregion: par\naddons:\n  db:\n    name: pg\n    kind: postgresql\n    env:\n      FOO: bar\n";
+        let p = write_tmp("yaml", yaml);
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("addon `db`"));
+        assert!(msg.contains("`env`"));
+        assert!(msg.contains("postgresql"));
+        assert!(msg.contains("Supported managed kinds"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn addon_domains_on_unmanaged_kind_rejected() {
+        let yaml = "name: P\norg: o\nregion: par\naddons:\n  db:\n    name: pg\n    kind: redis\n    domains:\n      - x.example.com\n";
+        let p = write_tmp("yaml", yaml);
+        let err = Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("`domains`"));
+        assert!(msg.contains("redis"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn addon_without_env_or_domains_skips_managed_check() {
+        let yaml =
+            "name: P\norg: o\nregion: par\naddons:\n  db:\n    name: pg\n    kind: postgresql\n";
+        let p = write_tmp("yaml", yaml);
+        // Plain DB addon without env/domains — must load fine.
+        Project::load_and_resolve(&p, None, None, &[], None, &[]).unwrap();
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]
