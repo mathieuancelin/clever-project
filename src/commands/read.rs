@@ -144,6 +144,8 @@ pub fn run(args: ReadArgs) -> Result<()> {
                 region: (listed.region != default_region).then_some(listed.region),
                 version: None, // not exposed by `clever addon list`
                 backup_path: None,
+                env: IndexMap::new(),
+                domains: vec![],
             },
         );
     }
