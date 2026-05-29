@@ -134,23 +134,24 @@ Every command takes `--format json` for machine-readable output, and `apply` / `
 
 ## Documentation
 
-The [full reference](docs/reference.md) covers every flag and file format in detail:
+Full documentation lives at **[mathieuancelin.github.io/clever-project](https://mathieuancelin.github.io/clever-project/)** — every command, the project file schema, variables, secrets, cross-references, managed addons, hooks, the state file, JSON output and more.
 
-- [Every command and its flags](docs/reference.md#commands)
-- [Project file schema](docs/reference.md#project-file-format)
-- [Variables, secrets & generators](docs/reference.md#variables)
-- [Cross-resource references](docs/reference.md#cross-resource-references)
-- [Managed addons](docs/reference.md#managed-addons-env-and-domains)
-- [Hooks](docs/reference.md#hooks)
-- [The state file](docs/reference.md#state-file)
-- [JSON output for CI](docs/reference.md#machine-readable-output---format-json)
-- [Behaviour notes & limitations](docs/reference.md#behaviour-notes--limitations)
+A few jumping-off points:
+
+- [Introduction](https://mathieuancelin.github.io/clever-project/docs/introduction)
+- [Quick start](https://mathieuancelin.github.io/clever-project/docs/quick-start)
+- [Commands](https://mathieuancelin.github.io/clever-project/docs/commands)
+- [Project file format](https://mathieuancelin.github.io/clever-project/docs/project-file)
+
+The docs source is in [`documentation/`](documentation/) (Docusaurus) and is published to GitHub Pages automatically.
 
 ## Building from source
 
 ```sh
 cargo build
 cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-See [Build & test](docs/reference.md#build--test) and [Releasing](docs/reference.md#releasing) in the reference for the full CI parity commands and the release process.
+CI runs all four on Linux, macOS and Windows. See the [contributing & releasing](https://mathieuancelin.github.io/clever-project/docs/contributing) docs for the release process.
