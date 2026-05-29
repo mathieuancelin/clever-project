@@ -1,0 +1,50 @@
+---
+sidebar_position: 7
+title: Cross-resource references
+description: Pull live values from another app or addon into an env block
+---
+
+# Cross-resource references
+
+You can pull a value from another app or addon's live env into a project app's `env:` block — or from an addon's provider-specific metadata for managed services that expose more than just env vars:
+
+```yaml
+apps:
+  worker:
+    env:
+      # Forward the PG host/password an addon injects into another app.
+      PG_HOST: ${apps.api.env.POSTGRESQL_ADDON_HOST}
+      PG_PASSWORD: ${apps.api.env.POSTGRESQL_ADDON_PASSWORD}
+      # Or read directly from the addon's env endpoint.
+      REDIS_URL: ${addons.cache.env.REDIS_URL}
+      # Or from the addon's v4 metadata endpoint (`.addon.<dotted.path>`),
+      # for managed services like otoroshi / keycloak / matomo / metabase
+      # that expose credentials and connection URLs there.
+      OTO_USER:     ${addons.otoroshi.addon.initialCredentials.user}
+      OTO_PASSWORD: ${addons.otoroshi.addon.initialCredentials.password}
+      OTO_API_URL:  ${addons.otoroshi.addon.api.url}
+```
+
+The first part (`apps` or `addons`) picks the namespace, the second part is the **project key** (not the Clever name — though those often match), the third part picks the source: `env` for a runtime env var, or `addon` for a field of the v4 provider metadata. The remaining segments are joined with `.` to form the lookup key:
+
+- `${apps.KEY.env.VAR}` — fetch `VAR` from the app's live env (includes vars Clever injects from linked addons)
+- `${addons.KEY.env.VAR}` — fetch `VAR` from the addon's env endpoint
+- `${addons.KEY.addon.a.b.c}` — fetch `a.b.c` from the provider-specific metadata JSON (only meaningful for managed services that expose this endpoint — otoroshi, keycloak, matomo, metabase; database addons return 404 and fall back to empty + warning)
+
+Hyphens are allowed in project keys (`apps.n8n-test-pg.env.…`).
+
+## Resolution model
+
+These references aren't resolved at load time — they're left as `${…}` literals and substituted in a later pass against live Clever state. Source apps' "live env" includes vars Clever injects from linked addons (`POSTGRESQL_ADDON_HOST` etc.), so the most common use case — forwarding one app's addon credentials into a sibling — works in one reference.
+
+**Addons created in the same run resolve in one apply.** `apply` resolves cross-refs *twice* internally: once before the plan output (against the pre-mutation snapshot, so the plan shows what would happen if nothing was created), and once again after the addon-creation phase. By then the new addons exist and the second pass picks up their real `POSTGRESQL_ADDON_HOST` etc. — so phase 2 (app create/update) pushes the resolved env in one go.
+
+**App→app cross-refs still need a second apply** when both apps are being created in the same run. The second pass only updates addon state; per-app cross-refs to apps being created in the same apply resolve to empty. Re-run `apply` once the source app exists.
+
+**Dry-run shows empty for to-be-created addons.** `--dry-run` only sees the pre-mutation snapshot. If your plan shows `+ DB_HOST = ""` for a cross-ref to an addon that's also being created, that's the dry-run quirk — the real apply will populate it.
+
+## Restrictions
+
+- Cross-refs work in `env:` values only — not in `name:`, `domains:`, `dependencies:`, etc.
+- Resolved at `apply` and `status` time. `check --offline` doesn't see the live values and won't catch typos.
+- Re-evaluated on every `apply` / `status`. A rotating addon password will surface as drift the next time you run.

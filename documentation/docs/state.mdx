@@ -1,0 +1,44 @@
+---
+sidebar_position: 11
+title: State file
+description: The .state sidecar that maps resource names to ids
+---
+
+# State file
+
+After every successful `apply` or `delete`, the CLI writes a sidecar `<project>.state` JSON file next to the project file. It records the Clever resources managed by that project so subsequent runs can resolve `name → id` without an org-wide `clever ... list`.
+
+## Format
+
+```json
+[
+  {
+    "kind": "app",
+    "id": "app_xxxxxxx-xxxxx-xxxxxx",
+    "org_id": "orga_xxxxxx-xxxx-xxxxx",
+    "region": "par",
+    "env": "prod",
+    "name": "prod-api"
+  },
+  {
+    "kind": "addon",
+    "id": "addon_xxxxxx-xxxxxx-xxxxxx",
+    "org_id": "orga_xxxxxx-xxxx-xxxxx",
+    "region": "par",
+    "env": "prod",
+    "name": "prod-api-db"
+  }
+]
+```
+
+`kind` is `app` or `addon`. Multiple envs coexist (names differ because of `${env}` interpolation), so applying with `--env dev` and `--env prod` against the same project file both write to the same `<project>.state` without clobbering each other.
+
+## Stale entries (out-of-sync state)
+
+If a resource is deleted out of band (Clever console, raw `clever delete`, a teammate), the state's `id` for it becomes stale. The CLI handles this automatically: when a call against a state-known id fails, the entry is dropped, listings are refreshed from `clever`, and the operation is retried with the corrected id (or skipped with a warning if the resource truly doesn't exist anymore). The state file is rewritten at the end of the run so it's correct for the next invocation.
+
+You shouldn't need to delete `<project>.state` by hand — but you can, and the next run will rebuild it from scratch.
+
+:::note
+The state file is a regenerable cache, not a contract. The default `.gitignore` excludes `*.state` — it's a per-machine cache.
+:::

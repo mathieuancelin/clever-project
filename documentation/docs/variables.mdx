@@ -1,0 +1,131 @@
+---
+sidebar_position: 5
+title: Variables
+description: Variables, environments, generators and precedence
+---
+
+# Variables
+
+The `variables:` section supports two shapes — pick the one that fits.
+
+## Flat form
+
+```yaml
+variables:
+  domain: foo.bar
+  apikey: shared-secret
+```
+
+Every variable is always available regardless of `${env}`.
+
+## Per-env form
+
+```yaml
+variables:
+  common:
+    domain: foo.bar     # available in every env
+  prod:
+    apikey: secret_for_prod
+  dev:
+    apikey: secret_for_dev
+    domain: dev.bar     # overrides common when ${env}=dev
+```
+
+The group named `common` is always merged in, then the group whose name matches the resolved value of `${env}` is merged on top.
+
+The active env is picked, in priority order:
+
+1. `--env <value>` on the command line
+2. `--variable env=<value>`
+3. default `prod`
+
+If `${env}` doesn't match any per-env group, only `common` applies — references to env-specific variables will fail loudly.
+
+:::note
+The two `variables:` shapes can't be mixed — every top-level value must be either all scalars (flat) or all mappings (per-env).
+:::
+
+## Special variables
+
+Always available, can't be redefined in `variables:`:
+
+- `${env}` — defaults to `prod`, overridable by `--env`
+- `${org}` — comes from the project file's `org` (or `--org`)
+- `${region}` — comes from the project file's `region` (or `--region`)
+
+## Generator functions
+
+The interpolator also recognises `${name(args)}` to call built-in generators. Each occurrence produces a fresh value at load time.
+
+| Function | Result |
+|---|---|
+| `${ulid()}` | 26-char uppercase ULID (Crockford Base32) |
+| `${ulid_lowercase()}` | same, lowercased |
+| `${uuid()}` | uppercase hyphenated UUID v4 |
+| `${uuid_lowercase()}` | standard lowercase hyphenated UUID v4 |
+| `${random_alphanumeric(N)}` | `N` random chars, mixed-case `[A-Za-z0-9]` |
+| `${random_alphanumeric_lowercase(N)}` | `N` random chars, `[a-z0-9]` only |
+
+The size argument is capped at 1024 to catch typos. Unknown function names and bad arguments surface as load-time errors the same way undefined variables do.
+
+```yaml
+apps:
+  api:
+    env:
+      SESSION_SECRET: ${random_alphanumeric_lowercase(64)}
+      REQUEST_ID_PREFIX: ${ulid_lowercase()}
+```
+
+:::warning Non-determinism
+These functions return a different value on every load. If you write `${uuid()}` in your project file and run `apply` twice, the second run will see drift on the env var and trigger a restart. Treat them as **one-shot bootstrap helpers**: generate the value on first apply, then `clever-project read` to pin the resolved value into your project file (or extract it into a `.secrets` sidecar).
+:::
+
+### Sharing one generated value
+
+Functions called *directly* inside multiple env values fire independently:
+
+```yaml
+env:
+  N8N_HOST: app-${ulid_lowercase()}.cleverapps.io   # ulid A
+  WEBHOOK_URL: https://app-${ulid_lowercase()}.cleverapps.io/   # ulid B (different)
+```
+
+To share, declare the function in a variable — it's evaluated *once* at resolver-build time, and every `${slug}` reference picks up the same value:
+
+```yaml
+variables:
+  common:
+    slug: ${ulid_lowercase()}
+env:
+  N8N_HOST: app-${slug}.cleverapps.io
+  WEBHOOK_URL: https://app-${slug}.cleverapps.io/
+```
+
+## Loading variables from a file
+
+The variables file can be YAML, JSON or TOML — same flat shape, format detected from the extension.
+
+```yaml
+# vars.yaml
+domain: example.com
+apikey: from-file
+```
+
+```sh
+clever-project apply project.clever.yaml --variables-file-path vars.yaml
+clever-project apply project.clever.toml --variables-file-path vars.toml
+```
+
+The flag is repeatable; later files override earlier ones.
+
+## Precedence (low → high)
+
+1. Project file `variables:` section (group merged with `common` if per-env form)
+2. `--variables-file-path FILE` entries (in order; later files win)
+3. `--variable foo=bar` entries
+4. `--env <value>` for the special `${env}` variable
+
+## Related
+
+- [Secrets](./secrets.mdx) — `${secrets.key}` and the `.secrets` sidecar.
+- [Cross-resource references](./cross-references.mdx) — pull live values from other apps and addons.

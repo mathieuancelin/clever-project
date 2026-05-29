@@ -1,0 +1,159 @@
+---
+sidebar_position: 3
+title: Quick start
+description: From zero to a deployed stack
+---
+
+# Quick start
+
+This walks you from an empty directory to a deployed stack and back.
+
+```sh
+# 1. Scaffold a project file (prompts you for the essentials)
+clever-project init
+
+# 2. Preview what would happen — no changes are made
+clever-project apply --env prod --dry-run
+
+# 3. Create everything for prod
+clever-project apply --env prod
+
+# 4. Spin up the same stack in another environment
+clever-project apply --env staging
+
+# 5. Check the live org still matches the file
+clever-project status
+
+# 6. Tear one environment down
+clever-project delete --env staging
+```
+
+Save your file as `project.clever.yaml` (or `.yml` / `.toml` / `.json`) in the working directory and clever-project finds it automatically — no path argument needed. See [project file lookup](./project-file.mdx#project-file-lookup).
+
+## The same project, in each format
+
+clever-project accepts YAML, JSON and TOML interchangeably — pick the one your team prefers.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<Tabs groupId="format">
+<TabItem value="yaml" label="YAML" default>
+
+```yaml
+name: my-project
+org: orga_xxxxxx-xxxx-xxxxx
+region: par
+variables:
+  domain: example.com
+apps:
+  api:
+    name: ${env}-api
+    kind: node
+    source:
+      from: https://github.com/me/my-api.git
+    domains:
+      - api.${env}.${domain}
+    env:
+      NODE_ENV: ${env}
+      PORT: "8080"
+    dependencies:
+      - db
+addons:
+  db:
+    name: ${env}-api-db
+    kind: postgresql
+    size: xs_sml
+    crypted: true
+```
+
+</TabItem>
+<TabItem value="json" label="JSON">
+
+```json
+{
+  "name": "my-project",
+  "org": "orga_xxxxxx-xxxx-xxxxx",
+  "region": "par",
+  "variables": {
+    "domain": "example.com"
+  },
+  "apps": {
+    "api": {
+      "name": "${env}-api",
+      "kind": "node",
+      "source": { "from": "https://github.com/me/my-api.git" },
+      "domains": ["api.${env}.${domain}"],
+      "env": {
+        "NODE_ENV": "${env}",
+        "PORT": "8080"
+      },
+      "dependencies": ["db"]
+    }
+  },
+  "addons": {
+    "db": {
+      "name": "${env}-api-db",
+      "kind": "postgresql",
+      "size": "xs_sml",
+      "crypted": true
+    }
+  }
+}
+```
+
+</TabItem>
+<TabItem value="toml" label="TOML">
+
+```toml
+name = "my-project"
+org = "orga_xxxxxx-xxxx-xxxxx"
+region = "par"
+
+[variables]
+domain = "example.com"
+
+[apps.api]
+name = "${env}-api"
+kind = "node"
+domains = ["api.${env}.${domain}"]
+dependencies = ["db"]
+
+[apps.api.source]
+from = "https://github.com/me/my-api.git"
+
+[apps.api.env]
+NODE_ENV = "${env}"
+PORT = "8080"
+
+[addons.db]
+name = "${env}-api-db"
+kind = "postgresql"
+size = "xs_sml"
+crypted = true
+```
+
+</TabItem>
+</Tabs>
+
+## Flipping environments
+
+Because names and values are templated with `${env}`, the same file deploys multiple isolated environments:
+
+```sh
+# Create everything for env=prod
+clever-project apply --env prod
+
+# Same project, different env — every ${env} reference flips
+clever-project apply --env staging
+
+# Preview without changing anything
+clever-project apply --env prod --dry-run
+
+# Tear it all down for one env
+clever-project delete --env staging
+```
+
+## Recipes
+
+The [`recipes/`](https://github.com/mathieuancelin/clever-project/tree/main/recipes) folder ships ready-to-apply project files for common stacks (n8n, more to come) — grab one, tweak the names and `org`, and run `clever-project apply`.

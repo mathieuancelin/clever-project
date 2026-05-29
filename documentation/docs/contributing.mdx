@@ -1,0 +1,62 @@
+---
+sidebar_position: 15
+title: Contributing & releasing
+description: Build, test and cut a release
+---
+
+# Contributing & releasing
+
+clever-project is a Rust CLI developed in the open. Contributions are welcome.
+
+## Build & test
+
+```sh
+cargo build
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+CI runs all four on Linux, macOS and Windows on every push and pull request (`.github/workflows/ci.yml`).
+
+## Documentation
+
+This site is built with [Docusaurus](https://docusaurus.io/) and lives in the `documentation/` folder:
+
+```sh
+cd documentation
+npm install
+npm start          # local dev server with hot reload
+npm run build      # production build into documentation/build
+```
+
+It's published to GitHub Pages automatically on every push to `main` that touches `documentation/**`, via `.github/workflows/docs.yml`.
+
+## Releasing
+
+Tag-driven. Pushing an annotated tag matching `v*.*.*` runs `.github/workflows/release.yml` which:
+
+1. Checks `Cargo.toml`'s `version` matches the tag and creates a GitHub Release (with auto-generated notes).
+2. Builds the binary across a matrix of targets in parallel (Linux x86_64 gnu+musl, Linux aarch64 gnu+musl, macOS x86_64+aarch64, Windows x86_64+aarch64) and uploads each archive to the release.
+3. Publishes to crates.io with `cargo publish --locked`.
+
+### Setup
+
+- Add `CARGO_REGISTRY_TOKEN` to the repo secrets (Settings → Secrets and variables → Actions). The publish job runs in a `crates-io` environment — create that environment if you want manual approval before publishing.
+- Cut a release with the helper script (recommended — it does all the safety checks for you):
+
+  ```sh
+  ./scripts/release.sh 0.2.0
+  ```
+
+  The script bumps `Cargo.toml`, runs fmt/clippy/tests, commits, tags `v0.2.0`, and pushes (with confirmation prompts). It refuses to run if the tree is dirty, you're not on `main`, the tag already exists, or `main` is out of sync with `origin`.
+
+  To do it manually instead:
+
+  ```sh
+  # 1. bump version in Cargo.toml + Cargo.lock, commit
+  # 2. tag and push
+  git tag -a v0.2.0 -m "v0.2.0"
+  git push origin main
+  git push origin v0.2.0
+  ```

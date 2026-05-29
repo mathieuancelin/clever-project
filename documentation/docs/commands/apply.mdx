@@ -1,0 +1,124 @@
+---
+sidebar_position: 3
+title: apply
+description: Create or update the resources in the project file
+---
+
+# `apply`
+
+Create or update the resources described by the project file. The project file is the source of truth: existing apps have their `env`, `domains`, `scalability` and service links replaced to match. Addons that already exist are left untouched (only their existence is reconciled).
+
+```
+clever-project apply [FILE] [OPTIONS]
+```
+
+## Options
+
+| Flag | Description |
+|---|---|
+| `--org <ID>` | Override `org` from the project file |
+| `--region <REGION>` | Override the default `region` |
+| `--env <VALUE>` | Set `${env}` (default `prod`) |
+| `--variable key=value` | One-off variable override (repeatable) |
+| `--variables-file-path <FILE>` | Load variable overrides from a YAML/JSON file (repeatable) |
+| `--secrets-file-path <FILE>` | Explicit secrets file (otherwise auto-discovered) |
+| `--secret key=value` | One-off secret override (repeatable). Wins over secrets files. |
+| `--dry-run` | Print a structured plan against the live org and exit. No mutations sent. |
+| `--yes` / `--auto-approve` | Skip the confirmation prompt. Required when stdin is not a TTY. |
+| `--target <SPEC>` | Restrict the run to one resource (repeatable). Syntax: `apps.KEY`, `addons.KEY`, `network_groups.KEY` (also `app.`, `addon.`, `ng.`). |
+| `--skip-hooks` | Bypass every `pre_*` / `post_*` hook for this run (see [Hooks](../hooks.mdx)). |
+| `-v, --verbose` | More log lines (`debug` level) |
+
+Apps with a GitHub `source.from` are created with `clever create --github owner/repo`. Non-GitHub sources create an empty app — push your code to the Clever remote yourself afterwards.
+
+## Confirmation gate
+
+Before touching anything, `apply` prints a structured plan (same one as `--dry-run`) and prompts:
+
+```
+Apply these changes? [y/N]:
+```
+
+The default is **no** — hitting Enter aborts. Type `y` to proceed.
+
+- Pass `--yes` (or `--auto-approve`) to skip the prompt. This is required when stdin is not a TTY (CI environments, piped invocations): without it, apply fails loud with `stdin is not a TTY and --yes was not given`.
+- If the plan has no mutations (everything is already in sync), the prompt is skipped and apply exits 0.
+- `--dry-run` always short-circuits: it prints the plan and exits, prompt or no prompt.
+
+## Resource targeting
+
+Pass `--target` (repeatable) to restrict the run to a subset of the project file:
+
+```sh
+clever-project apply --target apps.api
+clever-project apply --target addons.db --target apps.worker
+```
+
+The argument is `<section>.<key>` where `<section>` is `apps`, `addons`, or `network_groups` (with `app.`, `addon.`, `ng.` accepted as shorter aliases), and `<key>` is the project key under that section (the YAML key, not the resolved `name:`). Typos fail loud at start with a list of the available keys.
+
+When `--target` is set:
+
+- Only the targeted resources go through their normal create/update path.
+- Other project resources are read-only — their ids are looked up so phase-3 dependency wiring still works, but they aren't mutated.
+- If a targeted app depends on a non-targeted resource that doesn't yet exist anywhere (state or live), apply bails with a clear message: *"targeting leaves dependencies unresolved — add the missing `--target` flag, or run a full apply first."*
+- Restarts (phase 5) only fire for targeted apps.
+- The plan header reports the active targets so you can double-check.
+
+## Dry-run plan
+
+`--dry-run` produces a Terraform-style plan instead of running the phases: the CLI snapshots the live org, computes a per-resource diff against the project file, and prints it in one block:
+
+```
+Plan for project `My Stack` against org `orga_xxx` (default region `par`):
+  2 to create, 1 to update, 3 unchanged.
+
+  + addon "prod-cache" (redis, xs_sml, region=par)
+  = addon "prod-db"
+  + app "prod-api" (node, region=par, github=https://github.com/me/api.git)
+      env:
+        + NODE_ENV = "prod"
+        + PORT = "8080"
+      domains:
+        + api.example.com
+      dependencies:
+        + prod-cache
+        + prod-db
+  ~ app "prod-worker"
+      env:
+        + RUST_LOG = "info"
+        - DEBUG = "true"
+        ~ PORT: "8080" → "3000"
+      domains:
+        + worker.example.com
+        - old.worker.example.com
+  = app "prod-static"
+  = network_group "vpn"
+```
+
+The plan only counts as "to update" diffs that `apply` will actually rewrite: `env`, `domains`, `dependencies` on existing apps; member set on existing network groups. Drift on fields apply won't auto-update (app `kind`, `region`, `source.from`, anything on existing addons) is surfaced below the verdict with a `!` so you know to recreate manually if needed.
+
+`*.cleverapps.io` domains are filtered out before diffing, matching apply's runtime behaviour (it never removes them).
+
+## Phases
+
+`apply` runs in this order, each phase only mutating Clever when the diff requires it:
+
+1. **Addons**
+2. **Apps** — create / update
+3. **Service links** between apps and addons
+4. **Network groups** — create + member sync
+5. **Restarts**
+
+`apply` is fail-fast (except phase 3, which is wrapped in a one-shot retry).
+
+## Restarts
+
+At the end of an `apply`, the CLI calls `clever restart --app <id> --quiet` for each app that needs it:
+
+- newly created from a GitHub source (kicks off the first deployment),
+- existing app whose `env` was changed during the run,
+- existing app whose linked services (`dependencies`) were changed.
+
+Newly created apps *without* a GitHub source are not restarted (no code to deploy yet — push to the Clever remote yourself). Domain, scalability, build flavor or branch changes alone don't trigger a restart — a branch change only takes effect on the next push to the Clever remote.
+
+Restart is fire-and-forget: clever-project kicks it off and returns immediately. You see the result via the next `status` run or the Clever console.

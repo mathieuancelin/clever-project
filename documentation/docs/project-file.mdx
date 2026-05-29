@@ -1,0 +1,94 @@
+---
+sidebar_position: 4
+title: Project file format
+description: The project file schema and how it is discovered
+---
+
+# Project file format
+
+YAML, JSON or TOML, detected by extension (`.yaml`, `.yml`, `.json`, `.toml`). The same schema applies to all three — pick the one your team is most comfortable with. `read` writes whichever extension you specified for `-o`, and `init` defaults to YAML but accepts any `-o` extension.
+
+## Project file lookup
+
+`apply`, `delete`, `check` and `status` take the project file as a positional argument. If you omit it, the CLI looks for one of these (in order) in the current working directory:
+
+1. `project.clever.yaml`
+2. `project.clever.yml`
+3. `project.clever.toml`
+4. `project.clever.json`
+
+If none exists, the run aborts with a clear error pointing you at the missing descriptor. Naming your file `project.clever.yaml` (or `.toml` / `.json` — your call) and running `clever-project apply --env prod` (no path) is the recommended workflow.
+
+## Schema
+
+YAML shown for brevity — JSON and TOML map 1:1.
+
+```yaml
+name: <project name>
+description: <optional>
+org: orga_xxxxxxxx
+region: par
+variables: { ... }     # see Variables
+apps:
+  <key>:
+    name: <clever app name>            # required; usually templated with ${env}
+    kind: node                         # clever instance type — see the list below
+    region: par                        # optional; defaults to project region
+    source:                            # optional
+      from: https://github.com/owner/repo.git
+      branch: main
+    domains: [foo.example.com]
+    scalability:
+      auto: false
+      instances:
+        minNumber: 1
+        maxNumber: 2
+        minSize: XS
+        maxSize: S
+    build:                               # optional dedicated build instance
+      separate: true
+      flavor: M
+    dependencies: [<other-project-key>, ...]
+    env:
+      KEY: value
+addons:
+  <key>:
+    name: <clever addon name>
+    kind: postgresql                   # see provider mapping below
+    size: xs_sml                       # plan slug
+    crypted: true                      # encryption-at-rest (best-effort, may not apply to every provider)
+    region: par
+    version: "16"
+    # `env:` and `domains:` only apply to managed addons (otoroshi,
+    # keycloak, matomo, metabase, pulsar). They're pushed onto the
+    # underlying entrypoint app — see Managed addons.
+    env:
+      KEY: value
+    domains: [oto.example.com]
+network_groups:
+  <key>:
+    name: <clever ng label>            # the Network Group label on Clever
+    description: <optional>            # free-form text
+    link:                              # project keys (apps and/or addons) to attach
+      - api
+      - db
+```
+
+## Rules
+
+- Resource references inside `dependencies:` use the **project keys** (`db`, `api`, etc.), not Clever names or ids.
+- Network group `link:` entries are project keys too. Apps are attached via their `app_xxx` id, addons via the underlying provider id (`postgresql_xxx`, `redis_xxx`, ...) which clever-project tracks automatically in the [state file](./state.mdx).
+- App `kind:` must be one of: `docker`, `dotnet`, `elixir`, `frankenphp`, `go`, `gradle`, `haskell`, `jar`, `linux`, `maven`, `meteor`, `node`, `php`, `play1`, `play2`, `python`, `ruby`, `rust`, `sbt`, `static`, `static-apache`, `v`, `war`. Values are matched case-insensitively, and `java` is accepted as an alias for `jar`. Anything else is rejected at load time with the full list.
+- `region:` (root, per-app or per-addon) must be one of: `par`, `parhds`, `scw`, `grahds`, `ldn`, `mtl`, `rbx`, `rbxhds`, `sgp`, `syd`, `wsw`. Unknown regions are rejected at load time (this also applies to `--region` overrides).
+- Addon `kind:` accepts the short form (`postgresql`, `redis`, `cellar`, `matomo`, ...) and is mapped to the right Clever provider id (`postgresql-addon`, `redis-addon`, `cellar-addon`, `addon-matomo`, ...). Unknown values pass through unchanged.
+- Addon `kind`, `size`, and `region` are validated at the start of every `apply` against the live provider catalog returned by Clever's API (`clever curl /v2/products/addonproviders?orgaId=...`). Typos and unsupported combinations fail fast, before any mutation. Plan slug casing is normalized to the canonical value from the API (so `size: S_BIG` works even though Clever expects `s_big` for PostgreSQL). Skipped automatically when the project has no addons.
+- App `scalability.instances.minSize` / `maxSize` are validated at the start of every `apply` against the live instance catalog (`clever curl /v2/products/instances?for=...`). Unknown flavors are rejected with the list of valid sizes for that kind, and casing is normalized to Clever's canonical form (`s` → `S`, etc.). Skipped if no app declares a flavor.
+
+## Build flavor
+
+App `build:` mirrors the API's `buildFlavor` + `separateBuild`:
+
+- `separate: true, flavor: M` → enables a dedicated build instance with flavor `M`.
+- `separate: false` → disables the dedicated build instance.
+
+If you want to stop managing the build flavor entirely, drop the `build:` block — `apply` then stops touching it. See [limitations](./limitations.mdx) for the lifecycle details.

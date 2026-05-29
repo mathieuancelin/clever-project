@@ -1,0 +1,16 @@
+---
+sidebar_position: 14
+title: Behaviour & limitations
+description: What clever-project does and does not do
+---
+
+# Behaviour notes / limitations
+
+- **Source code push is not handled.** GitHub sources get `clever create --github owner/repo`; for non-GitHub sources the app is created empty and you deploy via Clever's git remote yourself.
+- **`apply` is full-replace.** Existing apps have their env vars, domains, scalability and service links overwritten to match the project file. Domains served by `*.cleverapps.io` are never removed (they're auto-managed by Clever).
+- **Addons aren't updated** if they already exist (plan, version, etc. stay as-is). Only their existence is reconciled.
+- **`clever config` isn't supported** — `clever-tools` doesn't expose it as JSON. The `config:` field is parsed but ignored on both `read` and `apply`.
+- **`scalability` and `build` on `read` / `status`** are populated via the per-app v2 endpoint. That endpoint also returns the app's env vars and vhosts, so `read` and `status` fold env + domains + scalability + build into a single round-trip per app (instead of three separate calls). Services still come from a separate endpoint. `status` only flags scalability or build drift when the project file declares the corresponding block (mirrors apply's "don't touch if absent").
+- **Build flavor lifecycle**: `clever scale --build-flavor <name>` enables the dedicated build instance with the given flavor; `clever scale --build-flavor disabled` turns it off. `apply` pushes the right side based on `build.separate` in the project file. If you want to stop managing the build flavor entirely, drop the `build:` block — apply then stops touching it.
+- **`apply` is sequential** and stops at the first error (except on `delete`, which is best-effort and continues).
+- **Verbose logging**: pass `-v` / `--verbose` to see the underlying `clever` commands and per-step state lookups.

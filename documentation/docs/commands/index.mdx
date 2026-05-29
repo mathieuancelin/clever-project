@@ -1,0 +1,35 @@
+---
+sidebar_position: 1
+title: Commands overview
+description: The clever-project subcommands at a glance
+slug: /commands
+---
+
+# Commands
+
+| Command | What it does |
+|---|---|
+| [`init`](./init.mdx) | Scaffold a fresh project file, interactively or from flags. |
+| [`apply`](./apply.mdx) | Create or update everything in the file. Prints a plan and asks for confirmation first. |
+| [`delete`](./delete.mdx) | Tear down the resources in the file (best-effort). |
+| [`check`](./check.mdx) | Validate the file — syntax, variables, kinds, regions, dependencies. Great for CI. |
+| [`status`](./status.mdx) | Compare the file against the live org and report drift. |
+| [`read`](./read.mdx) | Generate a project file from an existing org. |
+| [`completions`](../completions.mdx) | Print a shell completion script. |
+
+Every command accepts [`--format json`](../json-output.mdx) for machine-readable output. `apply` and `delete` show a confirmation plan you can preview with `--dry-run`.
+
+## Shared variable / env flags
+
+`apply`, `delete`, `check` and `status` share the same flags for resolving variables and the active environment:
+
+| Flag | Description |
+|---|---|
+| `--org <ID>` | Override `org` from the project file |
+| `--env <VALUE>` | Set `${env}` (default `prod`) |
+| `--variable key=value` | One-off variable override (repeatable) |
+| `--variables-file-path <FILE>` | Load variable overrides from a file (repeatable) |
+| `--secret key=value` | One-off secret override (repeatable). Wins over secrets files. |
+| `--secrets-file-path <FILE>` | Explicit secrets file (otherwise auto-discovered) |
+
+See [Variables](../variables.mdx) and [Secrets](../secrets.mdx) for how these resolve and their precedence.

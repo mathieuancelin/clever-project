@@ -1,0 +1,66 @@
+---
+sidebar_position: 6
+title: status
+description: Compare the project file against the live org and report drift
+---
+
+# `status`
+
+Compare a project file against the live state of its Clever Cloud org and report any drift. Read-only — never mutates anything. Together with [`check`](./check.mdx), it's the "is the file still safe and accurate?" pair: `check` validates the file's internal consistency, `status` confirms reality still matches.
+
+```
+clever-project status [FILE] [OPTIONS]
+```
+
+## Flags
+
+Same variable/env flags as [`check`](./check.mdx). Plus:
+
+| Flag | Description |
+|---|---|
+| `--brief` | Hide resources that are perfectly in sync; only show drift |
+| `--exit-on-drift` | Exit code 1 if any drift, pending creation, or orphan is found. For CI checks. |
+
+## Verdicts
+
+For each app, addon, and network group, `status` prints one of four verdicts:
+
+- `= name` — in sync.
+- `~ name drifted` — present on both sides, but one or more fields differ. The differing fields are printed underneath.
+- `+ name only in file (would be created)` — declared but doesn't exist live.
+- `- name orphan (managed but missing from file)` — live and previously tracked in `<project>.state`, but no longer in the file. Apply would not touch it, `delete` would.
+
+Orphan detection is **state-aware**: only resources that were touched by clever-project on a previous run (i.e. recorded in the [`.state`](../state.mdx) sidecar) are flagged. Resources that exist in the org but were created out-of-band aren't reported — `status` won't drown you in noise.
+
+## Example output
+
+```
+Status of project `My Project` in org `mlk` (default region `par`):
+
+  = app "prod-worker"
+  ~ app "prod-api" drifted
+      kind: "node" → "python"
+      env:
+        + NEW_KEY = "value"
+        - OLD_KEY = "old"  (only in org)
+        ~ PORT: "8080" → "3000"
+      domains:
+        + api.example.com
+        - legacy.example.com
+  + addon "prod-cache" only in file (would be created)
+  - app "legacy-worker" orphan (managed but missing from file)
+
+Summary: 1 drifted, 1 to create, 1 orphan, 1 in sync.
+```
+
+Scalar diffs are shown `"live" → "file"` so it reads "to converge, change live to match file." Set fields (`domains`, `dependencies`, NG members) use `+`/`-` per entry; map fields (`env`) use `+` (file-only), `-` (live-only), `~` (changed). Addon kind aliases (`postgresql` vs `postgresql-addon`, `cellar` vs `s3`, ...) and plan-slug casing (`S_BIG` vs `s_big`) are normalized before comparing, matching what `apply` would do — they never register as spurious drift.
+
+## Compared fields
+
+- **App**: `kind`, `region` (using the org's majority region as default), `source.from`, `domains`, `dependencies`, `env`.
+- **Addon**: `kind`, `region`, `size`.
+- **Network group**: members.
+
+Not compared (because `clever-tools` doesn't expose them in JSON read mode): addon `version` / `backup_path` / `crypted`, app `config`.
+
+`scalability`, `build` and `source.branch` *are* compared, but only when the project file declares the corresponding field. `apply` follows the same rule — it doesn't touch what isn't declared. Scalability drift looks like `fixed 1× XS → auto 1-4× S-M`; build drift like `disabled → separate L`; branch drift like `main → develop`. For `build:` with `separate: false`, the inert flavor value Clever persists is not compared (only the on/off state matters).

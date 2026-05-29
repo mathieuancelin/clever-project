@@ -1,0 +1,30 @@
+---
+sidebar_position: 7
+title: read
+description: Reverse-engineer a project file from an existing org
+---
+
+# `read`
+
+Reverse-engineer a project file from an existing org. Useful for bootstrapping clever-project on a stack you already have.
+
+```
+clever-project read --org <ID> [--app NAME_OR_ID]... [--addon NAME_OR_ID]... [--all] -o <FILE>
+```
+
+## Flags
+
+| Flag | Description |
+|---|---|
+| `--org <ID>` | Source organisation |
+| `--app <NAME\|ID>` | Read this app (repeatable) |
+| `--addon <NAME\|ID>` | Read this addon (repeatable) |
+| `--all` | Read every app and addon in the org (mutually exclusive with `--app`/`--addon`) |
+| `-o, --output <FILE>` | Output path (`.yaml` / `.yml` / `.json`) |
+
+## Notes
+
+- `scalability` and `build` are populated via the per-app v2 endpoint, which also returns env vars and vhosts — so `read` folds env + domains + scalability + build into a single round-trip per app.
+- `*.cleverapps.io` domains are filtered out of the generated file (they're auto-managed by Clever).
+- `read` does **not** populate `env:` or `domains:` on [managed addons](../managed-addons.mdx) — those fields are write-only from the project file's perspective. Use [`status`](./status.mdx) to inspect what's live.
+- `config:` is not read (`clever-tools` has no JSON mode for it). See [limitations](../limitations.mdx).

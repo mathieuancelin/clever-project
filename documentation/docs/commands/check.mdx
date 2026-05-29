@@ -1,0 +1,48 @@
+---
+sidebar_position: 5
+title: check
+description: Validate a project file without contacting Clever Cloud
+---
+
+# `check`
+
+Validate a project file without contacting Clever Cloud for any mutation. Useful in pre-commit hooks and CI.
+
+```
+clever-project check [FILE] [OPTIONS]
+```
+
+Runs, in order:
+
+1. **YAML/JSON syntax** and project schema parsing.
+2. **Variable interpolation** — every `${...}` reference must resolve. Catches typos, missing entries in `variables:`, `--variables-file-path`, `--variable`, or in the active `.secrets` file.
+3. **App `kind`** — must be one of the supported types (case-insensitive, `java` alias accepted).
+4. **Region** — root, per-app, per-addon, plus `--region` override.
+5. **Dependencies** — every `dependencies:` entry must be a project key under `apps:` or `addons:`; self-dependencies are rejected.
+6. **Network group links** — every `link:` entry in `network_groups:` must be a project key under `apps:` or `addons:`.
+7. **Name uniqueness** — two apps (or two addons, or two network groups) can't resolve to the same `name`. Cross-type collisions (app vs addon vs NG) are allowed.
+8. **Addon catalog (live API)** — addon `kind`, `size`, and per-addon `region` are checked against the live `clever curl /v2/products/addonproviders`.
+9. **App flavor catalog (live API)** — `scalability.instances.minSize` / `maxSize` are checked against `clever curl /v2/products/instances`.
+
+## Flags
+
+Same variable/env flags as [`apply`](./apply.mdx) (`--org`, `--region`, `--env`, `--variable`, `--variables-file-path`, `--secret`, `--secrets-file-path`). Plus:
+
+| Flag | Description |
+|---|---|
+| `--offline` | Skip steps 8 and 9 (live API). Static validation still runs. Useful when no `clever login` is available. |
+
+## Aggregated reporting
+
+All problems are reported in a single pass — `check` keeps going after the first failure and aggregates everything into one error message:
+
+```
+Error: 3 validation problems:
+  - undefined variable `apikey2` (in `${apikey2}`)
+  - app `api` has unknown dependency `cellar1`: not a project key in `apps:` or `addons:`
+  - addon `db` has unknown size `xs_big` for provider `postgresql-addon`. Available sizes: ...
+```
+
+The walk only stops short on truly fatal parse failures (YAML/JSON syntax, missing `org` / `region`, mixed `variables:` shape). Everything past parsing — missing variables, missing secrets, unknown kinds, regions, sizes, duplicate names, broken dependencies, broken NG links — accumulates and surfaces together.
+
+Exit code: `0` on success, non-zero on the bundled error.

@@ -1,0 +1,55 @@
+---
+sidebar_position: 2
+title: Installation
+description: Install clever-project and its prerequisites
+---
+
+# Installation
+
+## Prerequisites
+
+The official `clever-tools` CLI must be installed, on your `PATH`, and logged in:
+
+```sh
+npm i -g clever-tools
+clever login          # one-shot, opens the browser
+```
+
+clever-project doesn't manage nvm/bun for you — make sure `clever --version` works in the shell you invoke it from.
+
+## Install clever-project
+
+Pick one of the following.
+
+### Pre-built binary (recommended)
+
+Each tagged release publishes archives for Linux (x86_64 / aarch64, gnu + musl), macOS (x86_64 / aarch64) and Windows (x86_64 / aarch64) on the GitHub Releases page:
+
+```
+https://github.com/mathieuancelin/clever-project/releases/latest
+```
+
+Download the archive matching your platform, extract it, and put `clever-project` somewhere on your `PATH`.
+
+### From crates.io
+
+```sh
+cargo install clever-project
+```
+
+### From source
+
+```sh
+git clone https://github.com/mathieuancelin/clever-project.git
+cd clever-project
+cargo install --path .
+# or just:
+cargo build --release
+./target/release/clever-project --help
+```
+
+A Rust toolchain is only needed to build clever-project itself, not to run a pre-built binary.
+
+## Shell completions
+
+`clever-project completions <SHELL>` prints a completion script to stdout. See [Shell completions](./completions.mdx) for per-shell install instructions.

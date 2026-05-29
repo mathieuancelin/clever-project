@@ -1,0 +1,34 @@
+---
+sidebar_position: 4
+title: delete
+description: Tear down the resources in the project file
+---
+
+# `delete`
+
+Delete the resources listed in the project file. Network groups are removed first (releasing members), then apps before addons (so service links are released first). Anything that's already gone is skipped with a warning — `delete` is **best-effort** and never bails on a single failure.
+
+```
+clever-project delete [FILE] [OPTIONS]
+```
+
+Same flags as [`apply`](./apply.mdx) (minus `--region`), including `--yes` / `--auto-approve` and `--target`. With `--target apps.api`, only that resource is queued for deletion; everything else is left alone.
+
+## Confirmation gate
+
+Like `apply`, `delete` prints a plan and prompts before doing anything:
+
+```
+Plan for project `My Stack` against org `orga_xxx`:
+  3 to destroy: 1 network_group, 1 app, 1 addon.
+
+  - network_group "vpn"
+  - app "prod-api"
+  - addon "prod-db"
+
+Destroy these resources? [y/N]:
+```
+
+Default is **no**. Pass `--yes` to skip the prompt (required in non-TTY contexts). `--dry-run` prints the plan and exits without prompting.
+
+The plan is built purely from the project file — no Clever API call is made at this stage. Resources that have already been deleted out of band are detected at run time and skipped with a warning (consistent with delete's best-effort semantics).

@@ -1,0 +1,75 @@
+---
+sidebar_position: 1
+title: Introduction
+description: What clever-project is and why it exists
+---
+
+# Introduction
+
+**clever-project** lets you declare your [Clever Cloud](https://www.clever.cloud/) apps and addons in a single file, then create, update or tear them down with one command.
+
+It reads a YAML, JSON or TOML project file and drives the official `clever-tools` CLI to make your org match it. Think of it as a small, declarative layer on top of Clever Cloud — no Terraform, no custom scripts.
+
+## What it's for
+
+clever-project is built for **reproducible, parameterised, disposable environments**:
+
+- stand up an identical preview stack per branch,
+- hand a teammate a one-shot sandbox,
+- tear the whole thing down when you're done,
+
+all from the same file.
+
+```sh
+clever-project init                 # scaffold a project file
+clever-project apply --env prod     # create/update everything
+clever-project status               # see what drifted from the file
+clever-project delete --env staging # tear an environment down
+```
+
+## What a project file looks like
+
+One app, one database, wired together, with a generated slug for a unique domain:
+
+```yaml
+name: my-api
+org: orga_xxxxxx-xxxx-xxxxx
+region: par
+variables:
+  slug: ${ulid_lowercase()}
+display:
+  url: https://api-${slug}.cleverapps.io/
+apps:
+  api:
+    name: api-${slug}
+    kind: node
+    source:
+      from: https://github.com/me/my-api.git
+    domains:
+      - api-${slug}.cleverapps.io
+    dependencies:
+      - db
+    env:
+      DB_HOST: ${addons.db.env.POSTGRESQL_ADDON_HOST}
+      DB_URI:  ${addons.db.env.POSTGRESQL_ADDON_URI}
+addons:
+  db:
+    name: db-${slug}
+    kind: postgresql
+    size: xs_sml
+```
+
+Run `clever-project apply` and you get a Node app and a PostgreSQL addon, the addon's connection details injected into the app's env, the domain attached, and the deploy kicked off — in the right order.
+
+## Highlights
+
+- `${ulid_lowercase()}` and `${random_alphanumeric(32)}` are built-in [generators](./variables.mdx#generator-functions), evaluated once per run, so every reference to `${slug}` gets the same value.
+- `${addons.db.env.POSTGRESQL_ADDON_HOST}` is a [cross-resource reference](./cross-references.mdx) — clever-project creates the addon first, then injects the live value into the app's env.
+- The [`display`](./display.mdx) block is printed at the end of `apply` so you immediately see the URL to open.
+
+## Where to next
+
+- [Installation](./installation.mdx) — get the binary on your `PATH`.
+- [Quick start](./quick-start.mdx) — from zero to a deployed stack.
+- [Commands](./commands/index.mdx) — every subcommand in detail.
+- [Project file format](./project-file.mdx) — the full schema.
